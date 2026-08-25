@@ -35,17 +35,18 @@ import type {} from '@deepseek-ai/dsh-typert-registry'
 import type { TypertContribution, TypertPackageModel } from '@deepseek-ai/dsh-typert-registry'
 import { bindTypertRemote, type TypertGatewayBinding } from '@deepseek-ai/dsh-typert-protocol'
 import {
-  buildSkillDoc, buildSkillDocFromParts, FLAT_SKILL_EXT, invocationOf, isValidSkillName, parseSkillDoc, SKILL_FILE,
-  setSkillInvocation,
+  buildSkillDoc, buildSkillDocFromParts, deriveSkillFromSource, FLAT_SKILL_EXT, invocationOf, isValidSkillName,
+  parseSkillDoc, SKILL_FILE, setSkillInvocation,
 } from './skill-fmt.ts'
 import { MANAGER_ID_PREFIX, MCP_CLIENT_NAME, planPatch, rowIdFor, validateServerSet } from './mcp-config.ts'
 import { DESCRIPTORS, SERVICE } from './shared/remote.ts'
 import type {
   AddSkillInput, LiveMcpServer, McpSaveOutcome, McpServerDefinition, McpSnapshot,
-  McpServerPhase, SetSkillInvocableInput, SkillMutationOutcome, SkillRootInfo, SkillsSnapshot, SkillView,
+  McpServerPhase, SetSkillInvocableInput, SkillMutationOutcome, SkillRootInfo, SkillsSnapshot, SkillUploadPreview,
+  SkillView, SourceMarkdownFile,
 } from './shared/remote.ts'
 
-export { buildSkillDoc, parseSkillDoc, setSkillInvocation } from './skill-fmt.ts'
+export { buildSkillDoc, parseSkillDoc, setSkillInvocation, deriveSkillFromSource, slugifySkillName } from './skill-fmt.ts'
 export { planPatch, validateServerSet } from './mcp-config.ts'
 export type {
   AddSkillInput, LiveMcpServer, McpSaveOutcome, McpServerDefinition, McpSnapshot,
@@ -126,6 +127,7 @@ interface SkillMcpManagerReceiver {
   typertRemote: TypertGatewayBinding<SkillMcpManagerReceiver>
   listSkills(): Promise<SkillsSnapshot>
   addSkill(input: AddSkillInput): Promise<SkillMutationOutcome>
+  previewSkillUpload(source: SourceMarkdownFile): Promise<SkillUploadPreview>
   setSkillInvocable(input: SetSkillInvocableInput): Promise<SkillMutationOutcome>
   listMcpServers(): Promise<McpSnapshot>
   saveMcpServers(servers: McpServerDefinition[]): Promise<McpSaveOutcome>
@@ -325,7 +327,13 @@ export function apply(ctx: Context, config: Config) {
     },
 
     async addSkill(input: AddSkillInput): Promise<SkillMutationOutcome> {
-      const name = input.name.trim()
+      // When no name is typed, derive it from the uploaded file so an add is
+      // possible with a file alone (the client also pre-uses this same helper
+      // to pre-fill every field via previewSkillUpload).
+      const meta = input.sourceFile !== undefined
+        ? deriveSkillFromSource(input.sourceFile.content, input.sourceFile.name)
+        : undefined
+      const name = input.name.trim() !== '' ? input.name.trim() : (meta?.name ?? '')
       if (!isValidSkillName(name)) {
         return { ok: false, error: `skill name "${name}" must be kebab-case (lowercase letters, digits and hyphens)` }
       }
@@ -354,12 +362,12 @@ export function apply(ctx: Context, config: Config) {
       try {
         mkdirSync(path.dirname(target), { recursive: true })
         const description = input.description.trim()
-        const safeWhenToUse = input.whenToUse !== undefined && input.whenToUse !== '' ? input.whenToUse : undefined
+        const whenToUseInput = input.whenToUse
         let content: string
-        if (input.sourceFile !== undefined) {
-          // Uploaded file: keep its body verbatim and preserve its frontmatter
-          // keys; the form's name/description (and whenToUse, when provided)
-          // take precedence, and its own invocation flags stay in effect.
+        if (input.sourceFile !== undefined && meta !== undefined) {
+          // Uploaded file: keep its body verbatim and preserve its extra
+          // frontmatter keys; every editable field comes from the form when
+          // non-empty and falls back to the file's frontmatter otherwise.
           const { data, body } = parseSkillDoc(input.sourceFile.content)
           const extra: Record<string, unknown> = {}
           for (const [key, value] of Object.entries(data)) {
@@ -367,26 +375,25 @@ export function apply(ctx: Context, config: Config) {
               || key === 'disable-model-invocation' || key === 'user-invocable') continue
             extra[key] = value
           }
-          const invocation = invocationOf(data)
-          const fileWhenToUse = typeof data.whenToUse === 'string' && data.whenToUse !== '' ? data.whenToUse : undefined
-          const whenToUse = safeWhenToUse !== undefined ? safeWhenToUse : fileWhenToUse
+          const whenToUse = whenToUseInput !== undefined && whenToUseInput !== '' ? whenToUseInput : meta.whenToUse
           content = buildSkillDocFromParts({
             name,
-            description: description !== '' ? description : (typeof data.description === 'string' ? data.description : ''),
+            description: description !== '' ? description : meta.description,
             body,
             ...(whenToUse === undefined ? {} : { whenToUse }),
-            modelInvocable: invocation.modelInvocable,
-            userInvocable: invocation.userInvocable,
+            modelInvocable: input.modelInvocable ?? meta.modelInvocable,
+            userInvocable: input.userInvocable ?? meta.userInvocable,
             extra,
           })
         } else {
+          const safeWhenToUse = whenToUseInput !== undefined && whenToUseInput !== '' ? whenToUseInput : undefined
           content = buildSkillDoc({
             name,
             description,
             body: input.body,
             ...(safeWhenToUse === undefined ? {} : { whenToUse: safeWhenToUse }),
-            modelInvocable: true,
-            userInvocable: true,
+            modelInvocable: input.modelInvocable ?? true,
+            userInvocable: input.userInvocable ?? true,
           })
         }
         writeFileSync(target, content, { encoding: 'utf8', mode: 0o600 })
@@ -394,6 +401,11 @@ export function apply(ctx: Context, config: Config) {
         return { ok: false, error: `failed to write ${target}: ${error instanceof Error ? error.message : String(error)}` }
       }
       return { ok: true, path: target }
+    },
+
+    /** Parse an uploaded file and return every editable field for pre-fill. */
+    async previewSkillUpload(source: SourceMarkdownFile): Promise<SkillUploadPreview> {
+      return deriveSkillFromSource(source.content, source.name)
     },
 
     async setSkillInvocable(input: SetSkillInvocableInput): Promise<SkillMutationOutcome> {

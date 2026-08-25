@@ -62,10 +62,12 @@ Host half (dsh-skill-mcp-manager)
 
 - Add (typed): validates kebab-case name, writes `<root>/<name>/SKILL.md` in the
   standard frontmatter format (`name`, `description`, optional `whenToUse`).
-- Add (upload): pick a `.md` file and the host keeps its **body verbatim** and
-  preserves its frontmatter keys (`whenToUse`, `disable-model-invocation`,
-  `user-invocable`, and any custom keys such as `metadata`); the form's name and
-  description (and `whenToUse`, when typed) take precedence over the file's.
+- Add (upload): pick a `.md` file and every editable field is **pre-filled from
+  the file's frontmatter** — name (kebab-suggested; title/H1 fallback), description,
+  `whenToUse`, and the show-to-model/user toggles — so no retyping is needed (you
+  can still edit them). The host keeps the file's **body verbatim** and preserves
+  its remaining frontmatter keys (custom keys such as `metadata`); form fields
+  take precedence when edited. Add without a name also derives it from the file.
   Uploads are capped at 1 MB.
 - Toggle: rewrites only `disable-model-invocation` / `user-invocable`, body and
   every other frontmatter key preserved byte-for-byte.

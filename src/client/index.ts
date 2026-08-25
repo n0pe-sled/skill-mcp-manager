@@ -22,6 +22,7 @@ import { DESCRIPTORS, SERVICE } from '../shared/remote.ts'
 import type {
   AddSkillInput, McpSaveOutcome, McpServerDefinition, McpSnapshot,
   RemoteCallOutcome, SetSkillInvocableInput, SkillMutationOutcome, SkillsSnapshot,
+  SkillUploadPreview, SourceMarkdownFile,
 } from '../shared/remote.ts'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 
@@ -29,6 +30,7 @@ import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 interface SkillMcpManagerNamespace {
   listSkills(): Promise<RemoteResult<SkillsSnapshot>>
   addSkill(input: AddSkillInput): Promise<RemoteResult<SkillMutationOutcome>>
+  previewSkillUpload(source: SourceMarkdownFile): Promise<RemoteResult<SkillUploadPreview>>
   setSkillInvocable(input: SetSkillInvocableInput): Promise<RemoteResult<SkillMutationOutcome>>
   listMcpServers(): Promise<RemoteResult<McpSnapshot>>
   saveMcpServers(servers: McpServerDefinition[]): Promise<RemoteResult<McpSaveOutcome>>
@@ -41,6 +43,7 @@ export type {
 export type {
   RemoteCallOutcome, AddSkillInput, SkillMutationOutcome, SkillsSnapshot, SkillView,
   McpServerDefinition, McpSaveOutcome, McpSnapshot, LiveMcpServer, McpServerPhase,
+  SkillUploadPreview, SourceMarkdownFile,
 } from '../shared/remote.ts'
 
 /** Required services (cordis fiber inject). */
@@ -82,6 +85,7 @@ export function apply(ctx: ClientContext): void {
   const injected: SkillMcpManagerInjected = {
     listSkills: () => call(ns => ns.listSkills.bind(ns)),
     addSkill: input => call(ns => ns.addSkill.bind(ns), input),
+    previewSkillUpload: source => call(ns => ns.previewSkillUpload.bind(ns), source),
     setSkillInvocable: input => call(ns => ns.setSkillInvocable.bind(ns), input),
     listMcpServers: () => call(ns => ns.listMcpServers.bind(ns)),
     saveMcpServers: servers => call(ns => ns.saveMcpServers.bind(ns), servers),

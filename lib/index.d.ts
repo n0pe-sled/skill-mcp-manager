@@ -44,9 +44,26 @@ interface SourceMarkdownFile {
   /** Full file text, verbatim (may carry its own `---` frontmatter). */
   readonly content: string;
 }
+/**
+ * Derived skill metadata from an uploaded file, returned so the form can be
+ * pre-filled instead of requiring the user to retype the title/description.
+ */
+interface SkillUploadPreview {
+  /** Kebab-case suggested name (frontmatter `name`, else slugified H1/file name). */
+  readonly name: string;
+  /** Description from frontmatter (empty when absent). */
+  readonly description: string;
+  /** `whenToUse` from frontmatter, when present. */
+  readonly whenToUse?: string;
+  /** Model-facing visibility from the file's `disable-model-invocation`. */
+  readonly modelInvocable: boolean;
+  /** User-facing visibility from the file's `user-invocable`. */
+  readonly userInvocable: boolean;
+}
 /** Payload of one Add-skill request. */
 interface AddSkillInput {
-  /** Kebab-case skill name (also the on-disk folder name). */
+  /** Kebab-case skill name (also the on-disk folder name). May be empty when
+   * `sourceFile` is set — the host then derives it from the file. */
   readonly name: string;
   /** Frontmatter `description`. */
   readonly description: string;
@@ -54,10 +71,15 @@ interface AddSkillInput {
   readonly body: string;
   /** Optional frontmatter `whenToUse`. */
   readonly whenToUse?: string;
+  /** Model-facing visibility (`disable-model-invocation`); default true. */
+  readonly modelInvocable?: boolean;
+  /** User-facing visibility (`user-invocable`); default true. */
+  readonly userInvocable?: boolean;
   /**
    * Optional uploaded markdown file. The host keeps the file's body verbatim,
-   * preserves its frontmatter keys (invocation flags, custom keys), and applies
-   * the form's `name`/`description` on top.
+   * preserves its frontmatter keys (custom keys), and applies the form's fields
+   * (`name`/`description`/`whenToUse`/invocation) on top — falling back to the
+   * file's frontmatter when a form field is empty.
    */
   readonly sourceFile?: SourceMarkdownFile;
 }
@@ -150,6 +172,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteMap {
     'skillMcpManager/listSkills'(): Promise<RemoteResult<SkillsSnapshot>>;
     'skillMcpManager/addSkill'(input: AddSkillInput): Promise<RemoteResult<SkillMutationOutcome>>;
+    'skillMcpManager/previewSkillUpload'(source: SourceMarkdownFile): Promise<RemoteResult<SkillUploadPreview>>;
     'skillMcpManager/setSkillInvocable'(input: SetSkillInvocableInput): Promise<RemoteResult<SkillMutationOutcome>>;
     'skillMcpManager/listMcpServers'(): Promise<RemoteResult<McpSnapshot>>;
     'skillMcpManager/saveMcpServers'(servers: McpServerDefinition[]): Promise<RemoteResult<McpSaveOutcome>>;
@@ -158,6 +181,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     skillMcpManager: {
       listSkills(): Promise<RemoteResult<SkillsSnapshot>>;
       addSkill(input: AddSkillInput): Promise<RemoteResult<SkillMutationOutcome>>;
+      previewSkillUpload(source: SourceMarkdownFile): Promise<RemoteResult<SkillUploadPreview>>;
       setSkillInvocable(input: SetSkillInvocableInput): Promise<RemoteResult<SkillMutationOutcome>>;
       listMcpServers(): Promise<RemoteResult<McpSnapshot>>;
       saveMcpServers(servers: McpServerDefinition[]): Promise<RemoteResult<McpSaveOutcome>>;
@@ -195,6 +219,30 @@ interface SkillInvocation {
   readonly modelInvocable: boolean;
   readonly userInvocable: boolean;
 }
+/**
+ * Skill metadata derived from an uploaded source file, used to pre-fill the
+ * Add form (and as the host's fallback when a form field is empty).
+ */
+interface DerivedSkillMeta {
+  /** Kebab-case suggested name: frontmatter `name`, else slugified H1/file name. */
+  readonly name: string;
+  /** Description from frontmatter (empty when absent). */
+  readonly description: string;
+  /** `whenToUse` from frontmatter, when present. */
+  readonly whenToUse?: string;
+  readonly modelInvocable: boolean;
+  readonly userInvocable: boolean;
+}
+/** Best-effort kebab-case slug from an arbitrary title/file name. */
+declare function slugifySkillName(raw: string): string;
+/**
+ * Derive the editable skill fields from an uploaded markdown file: frontmatter
+ * `name` (or the body's first `#` heading, or the file name) is normalized to
+ * kebab-case, `description`/`whenToUse` and the invocation flags come from
+ * frontmatter. Authoritative on the host; the client uses it via the preview
+ * RPC to pre-fill every field.
+ */
+declare function deriveSkillFromSource(content: string, fileName: string): DerivedSkillMeta;
 /**
  * Split a document at its frontmatter. `{ data: {}, body: text }` when there is
  * no leading `---` block.
@@ -251,4 +299,4 @@ interface SettingsSection {
 }
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
-export { type AddSkillInput, Config, type LiveMcpServer, type McpSaveOutcome, type McpServerDefinition, type McpServerPhase, type McpSnapshot, type SetSkillInvocableInput, SettingsSection, type SkillMutationOutcome, type SkillRootInfo, type SkillView, type SkillsSnapshot, apply, buildSkillDoc, inject, name, parseSkillDoc, planPatch, setSkillInvocation, validateServerSet };
+export { type AddSkillInput, Config, type LiveMcpServer, type McpSaveOutcome, type McpServerDefinition, type McpServerPhase, type McpSnapshot, type SetSkillInvocableInput, SettingsSection, type SkillMutationOutcome, type SkillRootInfo, type SkillView, type SkillsSnapshot, apply, buildSkillDoc, deriveSkillFromSource, inject, name, parseSkillDoc, planPatch, setSkillInvocation, slugifySkillName, validateServerSet };

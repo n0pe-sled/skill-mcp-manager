@@ -67,9 +67,60 @@ export interface SkillInvocation {
   readonly userInvocable: boolean
 }
 
+/**
+ * Skill metadata derived from an uploaded source file, used to pre-fill the
+ * Add form (and as the host's fallback when a form field is empty).
+ */
+export interface DerivedSkillMeta {
+  /** Kebab-case suggested name: frontmatter `name`, else slugified H1/file name. */
+  readonly name: string
+  /** Description from frontmatter (empty when absent). */
+  readonly description: string
+  /** `whenToUse` from frontmatter, when present. */
+  readonly whenToUse?: string
+  readonly modelInvocable: boolean
+  readonly userInvocable: boolean
+}
+
 /** Whether a skill name is valid kebab-case. */
 export function isValidSkillName(name: string): boolean {
   return SKILL_NAME_RE.test(name) && name.length <= SKILL_NAME_MAX
+}
+
+/** Best-effort kebab-case slug from an arbitrary title/file name. */
+export function slugifySkillName(raw: string): string {
+  return raw.trim().toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, SKILL_NAME_MAX)
+    .replace(/-+$/g, '')
+}
+
+/**
+ * Derive the editable skill fields from an uploaded markdown file: frontmatter
+ * `name` (or the body's first `#` heading, or the file name) is normalized to
+ * kebab-case, `description`/`whenToUse` and the invocation flags come from
+ * frontmatter. Authoritative on the host; the client uses it via the preview
+ * RPC to pre-fill every field.
+ */
+export function deriveSkillFromSource(content: string, fileName: string): DerivedSkillMeta {
+  const { data, body } = parseSkillDoc(content)
+  const h1 = /^#\s+([^\n]+)$/m.exec(body)?.[1]?.trim() ?? ''
+  const rawName = typeof data.name === 'string' && data.name.trim() !== ''
+    ? data.name
+    : (h1 !== '' ? h1 : fileName.replace(/\.md$/i, '').replace(/[-_]+/g, ' '))
+  const name = isValidSkillName(rawName) ? rawName : slugifySkillName(rawName)
+  const description = typeof data.description === 'string' ? data.description.trim() : ''
+  const whenToUse = typeof data.whenToUse === 'string' && data.whenToUse !== '' ? data.whenToUse : undefined
+  const invocation = invocationOf(data)
+  const meta: DerivedSkillMeta = {
+    name,
+    description,
+    modelInvocable: invocation.modelInvocable,
+    userInvocable: invocation.userInvocable,
+    ...(whenToUse !== undefined ? { whenToUse } : {}),
+  }
+  return meta
 }
 
 /** Effective invocation flags; missing keys default to permitting that surface. */

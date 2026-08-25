@@ -165,29 +165,56 @@ try {
   assert.ok(toggledText.includes('Do the thing.'), 'body preserved after toggle')
   ok('skills flow: add / list / conflict / toggle')
 
-  // 4b. Skills flow — upload a .md source file
+  // 4b. Skills flow — upload preview pre-fills every field
+  const preview = await manager.previewSkillUpload({
+    name: 'original.md',
+    content: [
+      '---',
+      'name: Original Name',                    // non-kebab: must be slugged
+      'description: A derived description.',
+      'whenToUse: On uploads.',
+      'user-invocable: false',
+      '---',
+      '',
+      '# Original Title',
+      '',
+      'Body line.',
+    ].join('\n'),
+  })
+  assert.equal(preview.name, 'original-name', 'preview slugs a non-kebab frontmatter name')
+  assert.equal(preview.description, 'A derived description.', 'preview description from frontmatter')
+  assert.equal(preview.whenToUse, 'On uploads.', 'preview whenToUse from frontmatter')
+  assert.equal(preview.modelInvocable, true, 'preview model visible by default')
+  assert.equal(preview.userInvocable, false, 'preview user suppressed per file flag')
+  const previewH1 = await manager.previewSkillUpload({
+    name: 'My Skill.md',
+    content: '# Best Skill Ever\n\nJust a title.\n',
+  })
+  assert.equal(previewH1.name, 'best-skill-ever', 'preview falls back to slugified H1')
+  ok('skills flow: previewSkillUpload derives name/description/whenToUse/visibility')
+
+  // 4c. Skills flow — upload .md source file (form fields win; file kept)
+  const uploadedSource = [
+    '---',
+    'name: original-name',
+    'description: File description.',
+    'whenToUse: Use on Tuesdays.',
+    'disable-model-invocation: true',
+    'metadata:',
+    '  author: me',
+    'customKey: kept',
+    '---',
+    '',
+    '## From the file',
+    '',
+    'Uploaded body line.',
+  ].join('\n')
   const uploaded = await manager.addSkill({
     name: 'uploaded-skill',
     description: 'Form description (wins).',
     body: '',
-    sourceFile: {
-      name: 'original.md',
-      content: [
-        '---',
-        'name: original-name',
-        'description: File description.',
-        'whenToUse: Use on Tuesdays.',
-        'disable-model-invocation: true',
-        'metadata:',
-        '  author: me',
-        'customKey: kept',
-        '---',
-        '',
-        '## From the file',
-        '',
-        'Uploaded body line.',
-      ].join('\n'),
-    },
+    modelInvocable: false,
+    sourceFile: { name: 'original.md', content: uploadedSource },
   })
   assert.equal(uploaded.ok, true, 'upload add ok')
   assert.ok(existsSync(uploaded.path), 'uploaded bundle file written')
@@ -195,17 +222,31 @@ try {
   assert.ok(uploadedText.includes('name: uploaded-skill'), 'form name wins over file frontmatter name')
   assert.ok(uploadedText.includes('description: Form description (wins).'), 'form description wins over file frontmatter')
   assert.ok(uploadedText.includes('whenToUse: Use on Tuesdays.'), 'file whenToUse preserved')
-  assert.ok(uploadedText.includes('disable-model-invocation: true'), 'file invocation flag preserved')
+  assert.ok(uploadedText.includes('disable-model-invocation: true'), 'form invocation flag written')
   assert.ok(uploadedText.includes('author: me'), 'file nested metadata preserved')
   assert.ok(uploadedText.includes('customKey: kept'), 'file custom key preserved')
   assert.ok(uploadedText.includes('Uploaded body line.'), 'file body kept verbatim')
   assert.ok(!uploadedText.includes('name: original-name'), 'file frontmatter name not leaked')
   const uploadedSnapshot = await manager.listSkills()
   const uploadedView = uploadedSnapshot.skills.find(skill => skill.name === 'uploaded-skill')
-  assert.equal(uploadedView?.modelInvocable, false, 'uploaded skill model suppressed per file flag')
+  assert.equal(uploadedView?.modelInvocable, false, 'uploaded skill model suppressed per form flag')
   ok('skills flow: upload .md source (frontmatter + body preserved)')
 
-  // 4c. Skills flow — upload oversized file rejected
+  // 4d. Skills flow — no name typed: host derives it from the file
+  const derived = await manager.addSkill({
+    name: '',
+    description: '',
+    body: '',
+    sourceFile: { name: 'trainer.md', content: '---\ndescription: Train me.\n---\n\n# Skill Trainer\n\nBody.\n' },
+  })
+  assert.equal(derived.ok, true, 'named-by-file add ok')
+  assert.ok(derived.path.endsWith('/skill-trainer/SKILL.md'), 'name derived from H1: ' + derived.path)
+  const derivedText = readFileSync(derived.path, 'utf8')
+  assert.ok(derivedText.includes('name: skill-trainer'), 'derived frontmatter name')
+  assert.ok(derivedText.includes('description: Train me.'), 'derived description from file')
+  ok('skills flow: addSkill derives name from file when none typed')
+
+  // 4e. Skills flow — upload oversized file rejected
   const tooBig = await manager.addSkill({
     name: 'too-big-skill',
     description: 'x',
@@ -249,7 +290,7 @@ try {
 
   // 6. Skill root layout sanity ---------------------------------------------
   const entries = readdirSync(skillRoot)
-  assert.deepEqual(entries.sort(), ['demo-skill', 'uploaded-skill'].sort(), 'bundle dir layout')
+  assert.deepEqual(entries.sort(), ['demo-skill', 'skill-trainer', 'uploaded-skill'].sort(), 'bundle dir layout')
   assert.equal(existsSync(join(skillRoot, 'demo-skill', 'SKILL.md')), true, 'SKILL.md exists')
   ok('skill root layout')
 

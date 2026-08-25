@@ -73,9 +73,27 @@ export interface SourceMarkdownFile {
   readonly content: string
 }
 
+/**
+ * Derived skill metadata from an uploaded file, returned so the form can be
+ * pre-filled instead of requiring the user to retype the title/description.
+ */
+export interface SkillUploadPreview {
+  /** Kebab-case suggested name (frontmatter `name`, else slugified H1/file name). */
+  readonly name: string
+  /** Description from frontmatter (empty when absent). */
+  readonly description: string
+  /** `whenToUse` from frontmatter, when present. */
+  readonly whenToUse?: string
+  /** Model-facing visibility from the file's `disable-model-invocation`. */
+  readonly modelInvocable: boolean
+  /** User-facing visibility from the file's `user-invocable`. */
+  readonly userInvocable: boolean
+}
+
 /** Payload of one Add-skill request. */
 export interface AddSkillInput {
-  /** Kebab-case skill name (also the on-disk folder name). */
+  /** Kebab-case skill name (also the on-disk folder name). May be empty when
+   * `sourceFile` is set — the host then derives it from the file. */
   readonly name: string
   /** Frontmatter `description`. */
   readonly description: string
@@ -83,10 +101,15 @@ export interface AddSkillInput {
   readonly body: string
   /** Optional frontmatter `whenToUse`. */
   readonly whenToUse?: string
+  /** Model-facing visibility (`disable-model-invocation`); default true. */
+  readonly modelInvocable?: boolean
+  /** User-facing visibility (`user-invocable`); default true. */
+  readonly userInvocable?: boolean
   /**
    * Optional uploaded markdown file. The host keeps the file's body verbatim,
-   * preserves its frontmatter keys (invocation flags, custom keys), and applies
-   * the form's `name`/`description` on top.
+   * preserves its frontmatter keys (custom keys), and applies the form's fields
+   * (`name`/`description`/`whenToUse`/invocation) on top — falling back to the
+   * file's frontmatter when a form field is empty.
    */
   readonly sourceFile?: SourceMarkdownFile
 }
@@ -348,23 +371,56 @@ function parseMcpSaveOutcome(value: unknown): McpSaveOutcome {
   return { ok: false, error: value.error }
 }
 
+function parseSourceMarkdownFile(value: unknown): SourceMarkdownFile {
+  if (!isRecord(value) || !isString(value.name) || !isString(value.content)) {
+    throw new TypeError('source file must be an object with string name and content')
+  }
+  return { name: value.name, content: value.content }
+}
+
+function parseSkillUploadPreview(value: unknown): SkillUploadPreview {
+  if (!isRecord(value) || !isString(value.name) || !isString(value.description)
+    || !isBoolean(value.modelInvocable) || !isBoolean(value.userInvocable)) {
+    throw new TypeError('upload preview must have string name/description and two booleans')
+  }
+  const preview: SkillUploadPreview = {
+    name: value.name,
+    description: value.description,
+    modelInvocable: value.modelInvocable,
+    userInvocable: value.userInvocable,
+  }
+  if (value.whenToUse !== undefined) {
+    if (!isString(value.whenToUse)) throw new TypeError('upload preview whenToUse must be a string')
+    return { ...preview, whenToUse: value.whenToUse }
+  }
+  return preview
+}
+
 function parseAddSkillInput(value: unknown): AddSkillInput {
   if (!isRecord(value)) throw new TypeError('add-skill input must be a plain object')
-  const { name, description, body, whenToUse, sourceFile } = value
+  const { name, description, body, whenToUse, modelInvocable, userInvocable, sourceFile } = value
   if (!isString(name) || !isString(description) || !isString(body)) {
     throw new TypeError('add-skill input name, description and body must be strings')
   }
-  const optional: { whenToUse?: string; sourceFile?: SourceMarkdownFile } = {}
+  const optional: {
+    whenToUse?: string
+    modelInvocable?: boolean
+    userInvocable?: boolean
+    sourceFile?: SourceMarkdownFile
+  } = {}
   if (whenToUse !== undefined) {
     if (!isString(whenToUse)) throw new TypeError('add-skill input whenToUse must be a string')
     optional.whenToUse = whenToUse
   }
-  if (sourceFile !== undefined) {
-    if (!isRecord(sourceFile) || !isString(sourceFile.name) || !isString(sourceFile.content)) {
-      throw new TypeError('add-skill input sourceFile must be an object with string name and content')
-    }
-    optional.sourceFile = { name: sourceFile.name, content: sourceFile.content }
+  if (modelInvocable !== undefined) {
+    if (!isBoolean(modelInvocable)) throw new TypeError('add-skill input modelInvocable must be a boolean')
+    optional.modelInvocable = modelInvocable
   }
+  if (userInvocable !== undefined) {
+    if (!isBoolean(userInvocable)) throw new TypeError('add-skill input userInvocable must be a boolean')
+    optional.userInvocable = userInvocable
+  }
+  if (sourceFile !== undefined) optional.sourceFile = parseSourceMarkdownFile(sourceFile)
   return { name, description, body, ...optional }
 }
 
@@ -388,6 +444,7 @@ type TypertSchemaBoundary<T> = TypertSchema<T>
 
 const SKILLS_SNAPSHOT_SCHEMA: TypertSchemaBoundary<SkillsSnapshot> = { parse: parseSkillsSnapshot }
 const SKILL_MUTATION_SCHEMA: TypertSchemaBoundary<SkillMutationOutcome> = { parse: parseSkillMutationOutcome }
+const SKILL_UPLOAD_PREVIEW_SCHEMA: TypertSchemaBoundary<SkillUploadPreview> = { parse: parseSkillUploadPreview }
 const MCP_SNAPSHOT_SCHEMA: TypertSchemaBoundary<McpSnapshot> = { parse: parseMcpSnapshot }
 const MCP_SAVE_SCHEMA: TypertSchemaBoundary<McpSaveOutcome> = { parse: parseMcpSaveOutcome }
 
@@ -416,6 +473,12 @@ export const DESCRIPTORS: readonly InvocationDescriptor[] = [
     source: 'json',
     codec: { mode: 'strict', typeSymbol: 'dsh-skill-mcp-manager#AddSkillInput', schema: { parse: parseAddSkillInput } },
   }], SKILL_MUTATION_SCHEMA),
+  descriptor('previewSkillUpload', [{
+    name: 'source',
+    wire: 'source',
+    source: 'json',
+    codec: { mode: 'strict', typeSymbol: 'dsh-skill-mcp-manager#SourceMarkdownFile', schema: { parse: parseSourceMarkdownFile } },
+  }], SKILL_UPLOAD_PREVIEW_SCHEMA),
   descriptor('setSkillInvocable', [{
     name: 'input',
     wire: 'input',
@@ -435,6 +498,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteMap {
     'skillMcpManager/listSkills'(): Promise<RemoteResult<SkillsSnapshot>>
     'skillMcpManager/addSkill'(input: AddSkillInput): Promise<RemoteResult<SkillMutationOutcome>>
+    'skillMcpManager/previewSkillUpload'(source: SourceMarkdownFile): Promise<RemoteResult<SkillUploadPreview>>
     'skillMcpManager/setSkillInvocable'(input: SetSkillInvocableInput): Promise<RemoteResult<SkillMutationOutcome>>
     'skillMcpManager/listMcpServers'(): Promise<RemoteResult<McpSnapshot>>
     'skillMcpManager/saveMcpServers'(servers: McpServerDefinition[]): Promise<RemoteResult<McpSaveOutcome>>
@@ -443,6 +507,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     skillMcpManager: {
       listSkills(): Promise<RemoteResult<SkillsSnapshot>>
       addSkill(input: AddSkillInput): Promise<RemoteResult<SkillMutationOutcome>>
+      previewSkillUpload(source: SourceMarkdownFile): Promise<RemoteResult<SkillUploadPreview>>
       setSkillInvocable(input: SetSkillInvocableInput): Promise<RemoteResult<SkillMutationOutcome>>
       listMcpServers(): Promise<RemoteResult<McpSnapshot>>
       saveMcpServers(servers: McpServerDefinition[]): Promise<RemoteResult<McpSaveOutcome>>

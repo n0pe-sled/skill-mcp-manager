@@ -17,12 +17,14 @@ import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   AddSkillInput, McpSaveOutcome, McpServerDefinition, McpServerPhase,
   McpSnapshot, RemoteCallOutcome, SetSkillInvocableInput, SkillMutationOutcome, SkillsSnapshot,
+  SkillUploadPreview, SourceMarkdownFile,
 } from '../shared/remote.ts'
 
 /** Registration-side face the settings.section entry injects. */
 export interface SkillMcpManagerInjected {
   listSkills(): Promise<RemoteCallOutcome<SkillsSnapshot>>
   addSkill(input: AddSkillInput): Promise<RemoteCallOutcome<SkillMutationOutcome>>
+  previewSkillUpload(source: SourceMarkdownFile): Promise<RemoteCallOutcome<SkillUploadPreview>>
   setSkillInvocable(input: SetSkillInvocableInput): Promise<RemoteCallOutcome<SkillMutationOutcome>>
   listMcpServers(): Promise<RemoteCallOutcome<McpSnapshot>>
   saveMcpServers(servers: McpServerDefinition[]): Promise<RemoteCallOutcome<McpSaveOutcome>>
@@ -294,9 +296,16 @@ interface SkillFormState {
   body: string
   /** A selected .md file; when set it supplies the body (and its frontmatter). */
   sourceFile: PickedSkillFile | null
+  /** Model-facing visibility (frontmatter `disable-model-invocation`). */
+  modelInvocable: boolean
+  /** User-facing visibility (frontmatter `user-invocable`). */
+  userInvocable: boolean
 }
 
-const EMPTY_SKILL_FORM: SkillFormState = { name: '', description: '', whenToUse: '', body: '', sourceFile: null }
+const EMPTY_SKILL_FORM: SkillFormState = {
+  name: '', description: '', whenToUse: '', body: '', sourceFile: null,
+  modelInvocable: true, userInvocable: true,
+}
 
 /** Upload cap mirrored from the host (`MAX_UPLOAD_BYTES`). */
 const MAX_UPLOAD_BYTES = 1024 * 1024
@@ -375,8 +384,8 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
     const name = skillForm.name.trim()
     const description = skillForm.description.trim()
     const body = skillForm.body
-    if (name === '') {
-      setSkillActionNote({ ok: false, text: 'Give the skill a name.' })
+    if (name === '' && skillForm.sourceFile === null) {
+      setSkillActionNote({ ok: false, text: 'Give the skill a name, or upload a .md file to derive one.' })
       return
     }
     setSkillActionNote(null)
@@ -384,6 +393,8 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
       name,
       description,
       body,
+      modelInvocable: skillForm.modelInvocable,
+      userInvocable: skillForm.userInvocable,
       ...(skillForm.whenToUse.trim() !== '' ? { whenToUse: skillForm.whenToUse.trim() } : {}),
       ...(skillForm.sourceFile !== null ? { sourceFile: skillForm.sourceFile } : {}),
     }
@@ -401,7 +412,7 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
     }
   }
 
-  /** Read a picked .md file and stage it as the skill body source. */
+  /** Read a picked .md file, stage it, and pre-fill EVERY editable field. */
   const handlePickSkillFile = async (file: File | null) => {
     if (file === null) return
     if (!file.name.toLowerCase().endsWith('.md')) {
@@ -415,6 +426,24 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
     const content = await file.text()
     setSkillForm(current => ({ ...current, sourceFile: { name: file.name, content } }))
     setSkillActionNote(null)
+    // Parse the file's frontmatter so name/description/whenToUse/visibility are
+    // filled without the user retyping them. Empty text fields get filled;
+    // visibility toggles follow the file (both editable afterwards).
+    const preview = await props.previewSkillUpload({ name: file.name, content })
+    if (preview.ok) {
+      const p = preview.value
+      setSkillForm(current => ({
+        ...current,
+        sourceFile: { name: file.name, content },
+        name: current.name.trim() !== '' ? current.name : p.name,
+        description: current.description.trim() !== '' ? current.description : p.description,
+        whenToUse: current.whenToUse.trim() !== '' && p.whenToUse !== undefined ? current.whenToUse : (p.whenToUse ?? ''),
+        modelInvocable: p.modelInvocable,
+        userInvocable: p.userInvocable,
+      }))
+    } else {
+      setSkillActionNote({ ok: false, text: `Could not read the file's metadata: ${preview.error}` })
+    }
   }
 
   const handleClearSkillFile = () => {
@@ -606,8 +635,9 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
               {skillForm.sourceFile !== null
                 ? (
                   <p style={styles.notice}>
-                    The file&apos;s body and frontmatter (invocation flags, custom keys) are kept; name,
-                    description and {`whenToUse`} from the fields above take precedence.
+                    Fields were pre-filled from the file&apos;s frontmatter (title, description,&nbsp;
+                    {`whenToUse`}, visibility) — edit any of them before adding. The file&apos;s body and any
+                    custom frontmatter keys are kept as-is.
                   </p>
                 )
                 : null}
@@ -623,6 +653,24 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                 placeholder={'## What this skill does\n\nStep-by-step instructions the model should follow…'}
                 onChange={event => setSkillForm(current => ({ ...current, body: event.target.value }))}
               />
+              <div style={styles.itemLine}>
+                <label style={styles.switchRow}>
+                  <input
+                    type="checkbox"
+                    checked={skillForm.modelInvocable}
+                    onChange={event => setSkillForm(current => ({ ...current, modelInvocable: event.target.checked }))}
+                  />
+                  <span style={styles.hint}>Show to model</span>
+                </label>
+                <label style={styles.switchRow}>
+                  <input
+                    type="checkbox"
+                    checked={skillForm.userInvocable}
+                    onChange={event => setSkillForm(current => ({ ...current, userInvocable: event.target.checked }))}
+                  />
+                  <span style={styles.hint}>Show to user</span>
+                </label>
+              </div>
               <div style={styles.actions}>
                 <button type="button" style={styles.primaryButton} onClick={() => { void handleAddSkill() }}>
                   Add skill
