@@ -1,0 +1,11 @@
+# The dsh-skill-mcp-manager bundle layer: one row that is BOTH the node-half
+# entry and the browser-roster entry (client-modules scans enabled Loader
+# entries for packages declaring `dsh.client`). Activation is service-
+# availability driven: the node half injects `settings` and `typert` (both
+# mounted by dsh-base / the API gateway), and the browser half injects
+# `slots` and `remote` (both mounted by the web-app bundle's client
+# composition).
+
+- insert:
+    - id: skill-mcp-manager
+      name: dsh-skill-mcp-manager
