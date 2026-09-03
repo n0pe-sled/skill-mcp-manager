@@ -12,7 +12,7 @@
  * callbacks only. The component never sees `ctx`.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   AddSkillInput, McpSaveOutcome, McpServerDefinition, McpServerPhase,
@@ -233,6 +233,81 @@ const styles = {
     gridTemplateColumns: '1fr 1fr',
     gap: '0 12px',
   } as const,
+  tableWrap: {
+    overflowY: 'auto',
+    maxHeight: '360px',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: '8px',
+  } as const,
+  table: {
+    width: '100%',
+    // Separate borders + zero spacing so the sticky header sticks reliably
+    // inside the scroll container (collapse breaks sticky in some browsers).
+    borderCollapse: 'separate',
+    borderSpacing: 0,
+    fontSize: '13px',
+  } as const,
+  th: {
+    position: 'sticky',
+    top: 0,
+    textAlign: 'left',
+    padding: '8px 10px',
+    fontSize: '11.5px',
+    fontWeight: 600,
+    textTransform: 'uppercase',
+    letterSpacing: '0.04em',
+    color: 'var(--dsw-alias-label-tertiary)',
+    background: 'var(--dsw-alias-bg-layer-2)',
+    borderBottom: '1px solid var(--dsw-alias-border-l2)',
+    whiteSpace: 'nowrap' as const,
+  } as const,
+  td: {
+    padding: '8px 10px',
+    borderBottom: '1px solid var(--dsw-alias-border-l1)',
+    color: 'var(--dsw-alias-label-primary)',
+    verticalAlign: 'middle' as const,
+  } as const,
+  trClickable: {
+    cursor: 'pointer',
+  } as const,
+  expander: {
+    width: '22px',
+    height: '22px',
+    padding: 0,
+    fontSize: '14px',
+    lineHeight: '1',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: '5px',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-bg-layer-2)',
+    color: 'var(--dsw-alias-label-secondary)',
+    cursor: 'pointer',
+  } as const,
+  detailRow: {
+    background: 'var(--dsw-alias-bg-layer-0)',
+  } as const,
+  detailCell: {
+    padding: '10px 12px 12px 42px',
+    borderBottom: '1px solid var(--dsw-alias-border-l1)',
+  } as const,
+  thStack: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '4px',
+  } as const,
+  toggleAllButton: {
+    padding: '2px 8px',
+    fontSize: '11px',
+    borderRadius: '4px',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-bg-layer-1)',
+    color: 'var(--dsw-alias-label-secondary)',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap' as const,
+  } as const,
 }
 
 /** Chip color per live phase (fall back on the alias if a var is unknown). */
@@ -321,6 +396,8 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
   const [skillForm, setSkillForm] = useState<SkillFormState>(EMPTY_SKILL_FORM)
   const [skillActionNote, setSkillActionNote] = useState<{ ok: boolean; text: string } | null>(null)
   const [toggling, setToggling] = useState<string | null>(null)
+  const [togglingAll, setTogglingAll] = useState<'model' | 'user' | null>(null)
+  const [expandedSkills, setExpandedSkills] = useState<Set<string>>(new Set())
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   // ---- MCP tab state ----------------------------------------------------
@@ -450,6 +527,16 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
     setSkillForm(current => ({ ...current, sourceFile: null }))
   }
 
+  /** Collapse/expand a skill row so its details (description, path, toggles) show. */
+  const toggleExpand = (path: string) => {
+    setExpandedSkills(current => {
+      const next = new Set(current)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
+
   const handleToggleSkill = async (name: string, modelInvocable: boolean, userInvocable: boolean) => {
     setToggling(name)
     setSkillActionNote(null)
@@ -464,6 +551,33 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
       setSkillActionNote({ ok: false, text: outcome.error })
     }
     setToggling(null)
+    void refreshSkills()
+  }
+
+  /** Batch-set one visibility flag across every listed skill. */
+  const handleToggleAll = async (field: 'model' | 'user', value: boolean) => {
+    setTogglingAll(field)
+    setSkillActionNote(null)
+    for (const skill of skills.skills) {
+      const modelInvocable = field === 'model' ? value : skill.modelInvocable
+      const userInvocable = field === 'user' ? value : skill.userInvocable
+      const outcome = await props.setSkillInvocable({ name: skill.name, modelInvocable, userInvocable })
+      if (outcome.ok) {
+        if (!outcome.value.ok) {
+          setSkillActionNote({ ok: false, text: `Could not update ${skill.name}: ${outcome.value.error}` })
+          setTogglingAll(null)
+          void refreshSkills()
+          return
+        }
+      } else {
+        setSkillActionNote({ ok: false, text: `Could not update ${skill.name}: ${outcome.error}` })
+        setTogglingAll(null)
+        void refreshSkills()
+        return
+      }
+    }
+    setSkillActionNote({ ok: true, text: `Set ${field === 'model' ? 'model' : 'user'} visibility ${value ? 'on' : 'off'} for all skills.` })
+    setTogglingAll(null)
     void refreshSkills()
   }
 
@@ -495,6 +609,9 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
       {PHASE_TEXT[phase]}
     </span>
   )
+
+  const allModelShown = skills.skills.length > 0 && skills.skills.every(skill => skill.modelInvocable)
+  const allUserShown = skills.skills.length > 0 && skills.skills.every(skill => skill.userInvocable)
 
   return (
     <div style={styles.root}>
@@ -540,39 +657,102 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                   <p key={error} style={styles.error} role="status">{error}</p>
                 ))
                 : null}
-              {skills.skills.map(skill => (
-                <div key={skill.path} style={styles.item}>
-                  <div style={styles.itemLine}>
-                    <span style={styles.itemTitle}>{skill.name}</span>
-                    <span style={styles.badge}>{skill.kind}</span>
-                    <span style={styles.badge}>{skill.rootLabel}</span>
+              {skills.skills.length > 0
+                ? (
+                  <div style={styles.tableWrap}>
+                    <table style={styles.table} aria-label="Managed skills">
+                      <thead>
+                        <tr>
+                          <th style={{ ...styles.th, width: '36px' }} aria-label="Expanded" />
+                          <th style={styles.th}>Name</th>
+                          <th style={{ ...styles.th, textAlign: 'center' }}>
+                            <div style={styles.thStack}>
+                              <span>Show to model</span>
+                              <button
+                                type="button"
+                                style={styles.toggleAllButton}
+                                disabled={togglingAll !== null}
+                                onClick={() => void handleToggleAll('model', !allModelShown)}
+                              >
+                                {allModelShown ? 'Hide all' : 'Show all'}
+                              </button>
+                            </div>
+                          </th>
+                          <th style={{ ...styles.th, textAlign: 'center' }}>
+                            <div style={styles.thStack}>
+                              <span>Show to user</span>
+                              <button
+                                type="button"
+                                style={styles.toggleAllButton}
+                                disabled={togglingAll !== null}
+                                onClick={() => void handleToggleAll('user', !allUserShown)}
+                              >
+                                {allUserShown ? 'Hide all' : 'Show all'}
+                              </button>
+                            </div>
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {skills.skills.map(skill => {
+                          const isOpen = expandedSkills.has(skill.path)
+                          return (
+                            <Fragment key={skill.path}>
+                              <tr style={styles.trClickable} onClick={() => toggleExpand(skill.path)}>
+                                <td style={styles.td}>
+                                  <button
+                                    type="button"
+                                    style={styles.expander}
+                                    aria-expanded={isOpen}
+                                    aria-label={`${isOpen ? 'Collapse' : 'Expand'} ${skill.name}`}
+                                    onClick={event => {
+                                      event.stopPropagation()
+                                      toggleExpand(skill.path)
+                                    }}
+                                  >
+                                    {isOpen ? '−' : '+'}
+                                  </button>
+                                </td>
+                                <td style={styles.td}><span style={styles.itemTitle}>{skill.name}</span></td>
+                                <td style={{ ...styles.td, textAlign: 'center' }} onClick={event => event.stopPropagation()}>
+                                  <input
+                                    type="checkbox"
+                                    checked={skill.modelInvocable}
+                                    disabled={toggling === skill.name || togglingAll !== null}
+                                    aria-label={`Show ${skill.name} to the model`}
+                                    onChange={event => void handleToggleSkill(skill.name, event.target.checked, skill.userInvocable)}
+                                  />
+                                </td>
+                                <td style={{ ...styles.td, textAlign: 'center' }} onClick={event => event.stopPropagation()}>
+                                  <input
+                                    type="checkbox"
+                                    checked={skill.userInvocable}
+                                    disabled={toggling === skill.name || togglingAll !== null}
+                                    aria-label={`Show ${skill.name} to the user`}
+                                    onChange={event => void handleToggleSkill(skill.name, skill.modelInvocable, event.target.checked)}
+                                  />
+                                </td>
+                              </tr>
+                              {isOpen
+                                ? (
+                                  <tr style={styles.detailRow}>
+                                    <td colSpan={4} style={styles.detailCell}>
+                                      {skill.description !== ''
+                                        ? <p style={styles.hint}>{skill.description}</p>
+                                        : null}
+                                      <p style={styles.caption}>{skill.path}</p>
+                                    </td>
+                                  </tr>
+                                )
+                                : null}
+                            </Fragment>
+                          )
+                        })}
+                      </tbody>
+                    </table>
                   </div>
-                  {skill.description !== ''
-                    ? <p style={styles.hint}>{skill.description}</p>
-                    : null}
-                  <p style={styles.caption}>{skill.path}</p>
-                  <div style={styles.itemLine}>
-                    <label style={styles.switchRow}>
-                      <input
-                        type="checkbox"
-                        checked={skill.modelInvocable}
-                        disabled={toggling === skill.name}
-                        onChange={event => void handleToggleSkill(skill.name, event.target.checked, skill.userInvocable)}
-                      />
-                      <span style={styles.hint}>Show to model</span>
-                    </label>
-                    <label style={styles.switchRow}>
-                      <input
-                        type="checkbox"
-                        checked={skill.userInvocable}
-                        disabled={toggling === skill.name}
-                        onChange={event => void handleToggleSkill(skill.name, skill.modelInvocable, event.target.checked)}
-                      />
-                      <span style={styles.hint}>Show to user</span>
-                    </label>
-                  </div>
-                </div>
-              ))}
+                )
+                : null}
             </div>
 
             <div style={styles.card}>
