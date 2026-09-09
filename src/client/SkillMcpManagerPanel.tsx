@@ -12,6 +12,7 @@
  * callbacks only. The component never sees `ctx`.
  */
 
+import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Fragment, useEffect, useRef, useState } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
@@ -134,7 +135,7 @@ const styles = {
   error: {
     margin: 0,
     fontSize: '12px',
-    color: 'var(--dsw-alias-interactive-bg-hover-danger)',
+    color: 'var(--dsw-alias-label-primary)',
   },
   status: {
     margin: 0,
@@ -148,7 +149,9 @@ const styles = {
     alignItems: 'center',
   },
   button: {
-    padding: '6px 14px',
+    padding: '8px 14px',
+    minHeight: '36px',
+    fontWeight: 600,
     fontSize: '13px',
     borderRadius: '6px',
     border: '1px solid var(--dsw-alias-border-l2)',
@@ -156,8 +159,17 @@ const styles = {
     color: 'var(--dsw-alias-label-primary)',
     cursor: 'pointer',
   },
+  disclosureButton: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    boxSizing: 'border-box',
+    lineHeight: '20px',
+    padding: '7px 14px',
+  } as const,
   primaryButton: {
-    padding: '6px 14px',
+    padding: '8px 14px',
+    minHeight: '36px',
+    fontWeight: 600,
     fontSize: '13px',
     borderRadius: '6px',
     border: 'none',
@@ -166,12 +178,14 @@ const styles = {
     cursor: 'pointer',
   },
   dangerButton: {
-    padding: '4px 10px',
-    fontSize: '12px',
+    padding: '8px 14px',
+    minHeight: '36px',
+    fontSize: '13px',
+    fontWeight: 600,
     borderRadius: '6px',
-    border: '1px solid var(--dsw-alias-border-l2)',
-    background: 'var(--dsw-alias-bg-layer-2)',
-    color: 'var(--dsw-alias-interactive-bg-hover-danger)',
+    border: '1px solid #b42318',
+    background: '#b42318',
+    color: '#ffffff',
     cursor: 'pointer',
   },
   disabled: {
@@ -230,12 +244,12 @@ const styles = {
   } as const,
   formGrid: {
     display: 'grid',
-    gridTemplateColumns: '1fr 1fr',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(min(220px, 100%), 1fr))',
     gap: '0 12px',
   } as const,
   tableWrap: {
     overflowY: 'auto',
-    maxHeight: '360px',
+    maxHeight: '70vh',
     border: '1px solid var(--dsw-alias-border-l1)',
     borderRadius: '8px',
   } as const,
@@ -289,7 +303,7 @@ const styles = {
     background: 'var(--dsw-alias-bg-layer-0)',
   } as const,
   detailCell: {
-    padding: '10px 12px 12px 42px',
+    padding: '16px',
     borderBottom: '1px solid var(--dsw-alias-border-l1)',
   } as const,
   thStack: {
@@ -312,7 +326,7 @@ const styles = {
 
 /** Chip color per live phase (fall back on the alias if a var is unknown). */
 const PHASE_TEXT: Record<McpServerPhase, string> = {
-  active: 'connected',
+  active: 'loaded',
   pending: 'connecting…',
   failed: 'failed',
   unknown: 'not loaded',
@@ -320,7 +334,7 @@ const PHASE_TEXT: Record<McpServerPhase, string> = {
 const PHASE_COLOR: Record<McpServerPhase, string> = {
   active: 'var(--dsw-alias-positive-fill, #1d9e6b)',
   pending: 'var(--dsw-alias-warning-fill, #b7791f)',
-  failed: 'var(--dsw-alias-interactive-bg-hover-danger)',
+  failed: '#f97066',
   unknown: 'var(--dsw-alias-label-tertiary)',
 }
 
@@ -741,6 +755,13 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                                         ? <p style={styles.hint}>{skill.description}</p>
                                         : null}
                                       <p style={styles.caption}>{skill.path}</p>
+                                      <div style={{ color: 'var(--dsw-alias-label-primary)', overflowWrap: 'anywhere', marginTop: '16px' }}>
+                                        <MarkdownText text={skill.markdown} />
+                                      </div>
+                                      <details style={{ marginTop: '12px' }}>
+                                        <summary style={{ ...styles.button, ...styles.disclosureButton }}>View full SKILL.md source</summary>
+                                        <pre style={{ ...styles.caption, whiteSpace: 'pre-wrap', marginTop: '12px' }}>{skill.source}</pre>
+                                      </details>
                                     </td>
                                   </tr>
                                 )
@@ -757,6 +778,44 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
 
             <div style={styles.card}>
               <h3 style={{ ...styles.title, fontSize: '13.5px' }}>Add skill</h3>
+              <label style={styles.fieldLabel}>Upload a .md file (optional)</label>
+              <div style={styles.actions}>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".md,text/markdown,text/plain"
+                  style={{ display: 'none' }}
+                  aria-label="Upload skill markdown file"
+                  onChange={event => {
+                    const file = event.target.files?.[0] ?? null
+                    void handlePickSkillFile(file)
+                    // Reset the input so re-picking the same file re-triggers change.
+                    event.target.value = ''
+                  }}
+                />
+                <button type="button" style={styles.button} onClick={() => fileInputRef.current?.click()}>
+                  Upload skill markdown
+                </button>
+                {skillForm.sourceFile !== null
+                  ? (
+                    <>
+                      <span style={styles.status}>{skillForm.sourceFile.name}</span>
+                      <button type="button" style={styles.button} onClick={handleClearSkillFile}>
+                        Clear
+                      </button>
+                    </>
+                  )
+                  : null}
+              </div>
+              {skillForm.sourceFile !== null
+                ? (
+                  <p style={styles.notice}>
+                    Fields were pre-filled from the file&apos;s frontmatter (title, description,&nbsp;
+                    {`whenToUse`}, visibility) — edit any of them before adding. The file&apos;s body and any
+                    custom frontmatter keys are kept as-is.
+                  </p>
+                )
+                : null}
               {/* Keep styling simple: two-per-row where it fits, full width for body. */}
               <label style={styles.fieldLabel}>Name (kebab-case)</label>
               <input
@@ -783,44 +842,6 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                 placeholder="e.g. Always for pull request commits"
                 onChange={event => setSkillForm(current => ({ ...current, whenToUse: event.target.value }))}
               />
-              <label style={styles.fieldLabel}>Upload a .md file (optional)</label>
-              <div style={styles.actions}>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".md,text/markdown,text/plain"
-                  style={{ display: 'none' }}
-                  aria-label="Upload skill markdown file"
-                  onChange={event => {
-                    const file = event.target.files?.[0] ?? null
-                    void handlePickSkillFile(file)
-                    // Reset the input so re-picking the same file re-triggers change.
-                    event.target.value = ''
-                  }}
-                />
-                <button type="button" style={styles.button} onClick={() => fileInputRef.current?.click()}>
-                  Choose file…
-                </button>
-                {skillForm.sourceFile !== null
-                  ? (
-                    <>
-                      <span style={styles.status}>{skillForm.sourceFile.name}</span>
-                      <button type="button" style={styles.button} onClick={handleClearSkillFile}>
-                        Clear
-                      </button>
-                    </>
-                  )
-                  : null}
-              </div>
-              {skillForm.sourceFile !== null
-                ? (
-                  <p style={styles.notice}>
-                    Fields were pre-filled from the file&apos;s frontmatter (title, description,&nbsp;
-                    {`whenToUse`}, visibility) — edit any of them before adding. The file&apos;s body and any
-                    custom frontmatter keys are kept as-is.
-                  </p>
-                )
-                : null}
               <label style={styles.fieldLabel}>Instructions</label>
               <textarea
                 style={{
@@ -860,7 +881,7 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
           </section>
         )
         : (
-          <section aria-label="MCP Servers">
+          <section aria-label="MCP Servers" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
             {!mcp.bridgeResolvable
               ? (
                 <div style={styles.card}>
@@ -880,8 +901,8 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                 </button>
               </div>
               <p style={styles.hint}>
-                Saved into <span style={{ fontFamily: MONOSPACE }}>~/.dsh/cordis.patch.yml</span> as one
-                @deepseek-ai/dsh-mcp-client instance per server; DSH hot-reloads the file, so changes go live without a restart.
+                {mcp.live.length} connections · {mcp.live.reduce((count, server) => count + server.children.length, 0)} gateway servers.
+                Changes apply automatically. Expand a connection to review its tools.
               </p>
               {mcpError !== null
                 ? <p style={styles.error} role="status">{mcpError}</p>
@@ -901,29 +922,46 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                 : null}
               {mcp.live.map(server => (
                 <div key={`${server.id}-${server.present ? 'live' : 'cfg'}`} style={styles.item}>
-                  <div style={styles.itemLine}>
-                    <span style={styles.itemTitle}>{server.serverName}</span>
-                    {phaseBadge(server.phase)}
-                    {server.managed
-                      ? <span style={styles.badge}>managed</span>
-                      : <span style={styles.badge}>external</span>}
-                    {!server.present ? <span style={styles.badge}>pending apply</span> : null}
+                  <div style={{ ...styles.row, flexWrap: 'wrap' }}>
+                    <div style={styles.itemLine}>
+                      <span style={styles.itemTitle}>{server.serverName}</span>
+                      {phaseBadge(server.phase)}
+                      <span style={styles.badge}>{server.managed ? 'managed' : 'external'}</span>
+                      {!server.present ? <span style={styles.badge}>pending apply</span> : null}
+                    </div>
+                    {server.managed ? (
+                      <button type="button" style={{ ...styles.dangerButton, ...(saving ? styles.disabled : {}) }}
+                        disabled={saving} aria-label={`Remove ${server.serverName}`}
+                        onClick={() => void handleRemoveServer(server.id)}>Remove</button>
+                    ) : <span style={styles.hint}>Managed outside this panel</span>}
                   </div>
-                  <p style={styles.caption}>{server.id}</p>
-                  <div style={styles.actions}>
-                    {(server.managed || server.serverName !== 'unknown')
-                      ? (
-                        <button
-                          type="button"
-                          style={styles.dangerButton}
-                          disabled={saving}
-                          onClick={() => void handleRemoveServer(server.id)}
-                        >
-                          Remove
-                        </button>
-                      )
-                      : null}
-                  </div>
+                  <details style={{ marginTop: '8px' }}>
+                    <summary style={{ ...styles.button, ...styles.disclosureButton }}>View {server.tools.length} registered tools</summary>
+                    <ul style={{ ...styles.caption, marginTop: '12px', maxHeight: '260px', overflow: 'auto' }}>
+                      {server.tools.map(tool => <li key={tool}>{tool}</li>)}
+                    </ul>
+                    {server.tools.length === 0 ? <p style={styles.hint}>No tools are registered for this connection.</p> : null}
+                  </details>
+                  {server.children.length > 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '12px', borderLeft: '3px solid var(--dsw-alias-border-l2)', paddingLeft: '12px' }}>
+                      <p style={styles.itemTitle}>Servers in this gateway</p>
+                      {server.children.map(child => (
+                        <details key={child.name} style={styles.item}>
+                          <summary style={{ ...styles.itemLine, cursor: 'pointer', minHeight: '36px' }}>
+                            <span style={styles.itemTitle}>{child.name}</span>
+                            <span style={styles.badge}>{child.availableTools.length > 0 ? `${child.availableTools.length} tools available` : 'No tools detected'}</span>
+                            <span style={styles.hint}>View details</span>
+                          </summary>
+                          <p style={{ ...styles.hint, marginTop: '8px' }}>{child.description}</p>
+                          <p style={styles.hint}>Managed through the Docker gateway profile.</p>
+                          {child.availableTools.length === 0 ? <p style={styles.hint}>This server is configured, but no matching tools are registered. It may be filtered, unavailable, or waiting to start.</p> : null}
+                          <ul style={{ ...styles.caption, maxHeight: '240px', overflow: 'auto' }}>
+                            {child.tools.map(tool => <li key={tool}>{tool}{child.availableTools.includes(tool) ? '' : ' · not detected'}</li>)}
+                          </ul>
+                        </details>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               ))}
             </div>
@@ -981,6 +1019,25 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                         args: event.target.value.split('\n').filter(line => line.trim() !== ''),
                       }))}
                     />
+                  </>
+                )
+                : (
+                  <>
+                    <label style={styles.fieldLabel}>URL</label>
+                    <input
+                      style={styles.input}
+                      aria-label="URL"
+                      value={mcpDraft.url}
+                      placeholder="https://example.com/mcp"
+                      spellCheck={false}
+                      onChange={event => setMcpDraft(current => ({ ...current, url: event.target.value }))}
+                    />
+                  </>
+                )}
+              <details>
+                <summary style={{ ...styles.button, ...styles.disclosureButton }}>Advanced options</summary>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '12px' }}>
+                  {mcpDraft.transport === 'stdio' ? (<>
                     <label style={styles.fieldLabel}>Environment (KEY=value, one per line)</label>
                     <textarea
                       style={{ ...styles.textarea, minHeight: '64px' }}
@@ -1001,19 +1058,7 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                       spellCheck={false}
                       onChange={event => setMcpDraft(current => ({ ...current, cwd: event.target.value }))}
                     />
-                  </>
-                )
-                : (
-                  <>
-                    <label style={styles.fieldLabel}>URL</label>
-                    <input
-                      style={styles.input}
-                      aria-label="URL"
-                      value={mcpDraft.url}
-                      placeholder="https://example.com/mcp"
-                      spellCheck={false}
-                      onChange={event => setMcpDraft(current => ({ ...current, url: event.target.value }))}
-                    />
+                  </>) : (<>
                     <label style={styles.fieldLabel}>Headers (KEY=value, one per line)</label>
                     <textarea
                       style={{ ...styles.textarea, minHeight: '64px' }}
@@ -1025,8 +1070,7 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                         headers: parseKeyValueLines(event.target.value),
                       }))}
                     />
-                  </>
-                )}
+                  </>)}
               <label style={styles.switchRow}>
                 <input
                   type="checkbox"
@@ -1035,6 +1079,8 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                 />
                 <span style={styles.hint}>Fail activation when the initial connect/sync fails</span>
               </label>
+                </div>
+              </details>
               <div style={styles.actions}>
                 <button type="button" style={saving ? { ...styles.primaryButton, ...styles.disabled } : styles.primaryButton} disabled={saving} onClick={() => { void handleAddServer() }}>
                   {saving ? 'Saving…' : 'Add server'}

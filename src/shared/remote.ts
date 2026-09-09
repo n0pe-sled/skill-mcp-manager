@@ -35,6 +35,8 @@ export interface SkillView {
   readonly name: string
   /** Frontmatter `description` (empty when absent). */
   readonly description: string
+  readonly markdown: string
+  readonly source: string
   /** Absolute path of the containing root. */
   readonly root: string
   /** Human label of the containing root. */
@@ -176,6 +178,15 @@ export interface LiveMcpServer {
   readonly managed: boolean
   /** False when there is no live loader entry for the managed id. */
   readonly present: boolean
+  readonly tools: readonly string[]
+  readonly children: readonly McpChildServer[]
+}
+
+export interface McpChildServer {
+  readonly name: string
+  readonly description: string
+  readonly tools: readonly string[]
+  readonly availableTools: readonly string[]
 }
 
 /** Full MCP snapshot: managed defs, live instances, bridge availability. */
@@ -244,14 +255,14 @@ function isStringDict(value: unknown): value is Record<string, string> {
 
 function parseSkillView(value: unknown): SkillView {
   if (!isRecord(value)) throw new TypeError('skill must be a plain object')
-  const { name, description, root, rootLabel, kind, path, modelInvocable, userInvocable } = value
-  if (!isString(name) || !isString(description) || !isString(root) || !isString(rootLabel)
+  const { name, description, markdown, source, root, rootLabel, kind, path, modelInvocable, userInvocable } = value
+  if (!isString(markdown) || !isString(source) || !isString(name) || !isString(description) || !isString(root) || !isString(rootLabel)
     || !isString(path) || (kind !== 'bundle' && kind !== 'flat')
     || !isBoolean(modelInvocable) || !isBoolean(userInvocable)) {
     throw new TypeError('skill has invalid fields')
   }
   return {
-    name, description, root, rootLabel,
+    name, description, markdown, source, root, rootLabel,
     kind: kind === 'bundle' ? 'bundle' : 'flat',
     path, modelInvocable, userInvocable,
   }
@@ -325,6 +336,17 @@ function acceptsMcpServer(value: unknown): boolean {
   }
 }
 
+function parseMcpChildren(value: unknown): McpChildServer[] {
+  if (!Array.isArray(value)) throw new TypeError('MCP children must be an array')
+  return value.map(child => {
+    if (!isRecord(child) || !isString(child.name) || !isString(child.description)
+      || !isStringArray(child.tools) || !isStringArray(child.availableTools)) {
+      throw new TypeError('Invalid MCP child server')
+    }
+    return { name: child.name, description: child.description, tools: child.tools, availableTools: child.availableTools }
+  })
+}
+
 function parseMcpSnapshot(value: unknown): McpSnapshot {
   if (!isRecord(value)) throw new TypeError('mcp snapshot must be a plain object')
   const { servers, live, bridgeResolvable, patchPath, warnings } = value
@@ -344,6 +366,8 @@ function parseMcpSnapshot(value: unknown): McpSnapshot {
       id: entry.id, serverName: entry.serverName,
       phase: entry.phase as McpServerPhase,
       managed: entry.managed, present: entry.present,
+      tools: isStringArray(entry.tools) ? entry.tools : [],
+      children: parseMcpChildren(entry.children),
     }
   })
   return { servers, live: parsedLive, bridgeResolvable, patchPath, warnings }

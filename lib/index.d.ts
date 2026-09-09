@@ -10,6 +10,8 @@ interface SkillView {
   readonly name: string;
   /** Frontmatter `description` (empty when absent). */
   readonly description: string;
+  readonly markdown: string;
+  readonly source: string;
   /** Absolute path of the containing root. */
   readonly root: string;
   /** Human label of the containing root. */
@@ -142,6 +144,14 @@ interface LiveMcpServer {
   readonly managed: boolean;
   /** False when there is no live loader entry for the managed id. */
   readonly present: boolean;
+  readonly tools: readonly string[];
+  readonly children: readonly McpChildServer[];
+}
+interface McpChildServer {
+  readonly name: string;
+  readonly description: string;
+  readonly tools: readonly string[];
+  readonly availableTools: readonly string[];
 }
 /** Full MCP snapshot: managed defs, live instances, bridge availability. */
 interface McpSnapshot {

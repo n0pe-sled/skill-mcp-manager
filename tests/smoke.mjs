@@ -169,6 +169,8 @@ try {
   assert.equal(snapshot.skills.length, 1, 'one skill listed')
   assert.equal(snapshot.skills[0].name, 'demo-skill', 'listed name')
   assert.equal(snapshot.skills[0].modelInvocable, true, 'default model invocable')
+  assert.equal(snapshot.skills[0].markdown, plugin.parseSkillDoc(written).body, 'complete markdown body returned')
+  assert.equal(snapshot.skills[0].source, written, 'full source including frontmatter returned')
 
   const lowerPriorityRoot = join(dir, 'lower-priority-skills')
   mkdirSync(join(lowerPriorityRoot, 'demo-skill'), { recursive: true })
@@ -308,7 +310,16 @@ try {
   assert.equal(idempotent.applied, true, 'identical re-save reports the layer in sync')
   assert.equal(readFileSync(patchFile, 'utf8'), idempotentBytes, 'identical re-save produces zero file churn')
 
+  ctx.get = key => key === 'loader' ? { *entries() {
+    yield { options: { id: 'external', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'outside' } }, disabled: false, fiber: { state: 2 } }
+    yield { options: { id: 'nested:disabled', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'disabled' } }, disabled: true, fiber: { state: 2 } }
+  } } : key === 'tools' ? { schemas: () => [{ name: 'mcp__outside__read' }, { name: 'other_tool' }] } : undefined
   const mcpSnapshot = await manager.listMcpServers()
+  assert.equal(mcpSnapshot.live.find(s => s.id === 'external').managed, false)
+  assert.deepEqual(mcpSnapshot.live.find(s => s.id === 'external').tools, ['mcp__outside__read'])
+  assert.equal(mcpSnapshot.live.find(s => s.id === 'nested:disabled').phase, 'unknown')
+  const codec = contributions[0].invocations.find(d => d.method === 'listMcpServers').result.schema
+  assert.deepEqual(codec.parse(mcpSnapshot), mcpSnapshot)
   assert.equal(mcpSnapshot.servers.length, 1, 'snapshot lists managed server')
   assert.equal(mcpSnapshot.bridgeResolvable, true, 'bridge resolves (devDep present)')
 

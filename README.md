@@ -77,7 +77,28 @@ Host half (dsh-skill-mcp-manager)
   same format `dsh-skill-filesystem` uses. Duplicate names use the first root,
   matching the provider's precedence.
 
+### Skill review
+
+The upload button appears first in the Add skill form. Expanding a listed skill
+renders its complete Markdown body with the harness renderer. The source toggle
+shows the original file, including all frontmatter.
+
 ### MCP servers
+
+- Each connection shows its registered tools. Docker gateways using `--profile`
+  also show that profile's child servers, including children with no registered
+  tools. Discovery uses the read-only Docker CLI and matches catalog tool names
+  against the harness registry. Catalog snapshots may omit newer tools; the
+  connection's full registered-tool list remains available.
+- A loaded plugin is labeled **loaded**, since loader activation alone does not
+  prove a successful MCP connection. Child tool counts indicate detected tools,
+  not a live health check. Docker child servers are managed through Docker.
+- Remove is available only for connections owned by this panel. Optional
+  connection fields are grouped under Advanced options.
+- Docker gateways with `--servers` show the selected names. Other gateway types
+  and Docker gateways without either selection show their registered tools;
+  Docker discovery limitations and CLI failures appear as warnings.
+
 
 - Settings is the source of truth. On every change the manager rewrites
   `$DSH_HOME/cordis.patch.yml`, **preserving every row it does not own**
@@ -92,6 +113,7 @@ Host half (dsh-skill-mcp-manager)
 
 ## Verification
 
+- `node tests/discovery.mjs` — Docker profile selection, child tool matching, and failure containment.
 - `node tests/smoke.mjs` — host-half smoke test (stubbed context, temp dirs;
   never touches `$DSH_HOME`).
 - Second-instance integration (temp `DSH_HOME`, `dsh --profile <it>` on a free

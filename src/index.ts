@@ -20,6 +20,7 @@
  */
 
 import path from 'node:path'
+import { discoverDockerChildren, isDockerGateway } from './mcp-discovery.ts'
 import os from 'node:os'
 import {
   mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync,
@@ -38,7 +39,7 @@ import {
   buildSkillDoc, buildSkillDocFromParts, deriveSkillFromSource, FLAT_SKILL_EXT, invocationOf, isValidSkillName,
   parseSkillDoc, SKILL_FILE, setSkillInvocation,
 } from './skill-fmt.ts'
-import { MANAGER_ID_PREFIX, MCP_CLIENT_NAME, planPatch, rowIdFor, validateServerSet } from './mcp-config.ts'
+import { MCP_CLIENT_NAME, planPatch, rowIdFor, validateServerSet } from './mcp-config.ts'
 import { DESCRIPTORS, SERVICE } from './shared/remote.ts'
 import type {
   AddSkillInput, LiveMcpServer, McpSaveOutcome, McpServerDefinition, McpSnapshot,
@@ -103,13 +104,13 @@ const MAX_UPLOAD_BYTES = 1024 * 1024
 
 /** Structural slice of the Loader we need (avoids importing loader types). */
 interface LoaderLike {
-  entries(): readonly LoaderEntryLike[]
+  entries(): Iterable<LoaderEntryLike>
 }
 interface LoaderEntryLike {
   readonly options: {
     readonly id?: unknown
     readonly name?: unknown
-    readonly config?: { serverName?: unknown }
+    readonly config?: { serverName?: unknown; command?: string; args?: string[]; env?: Record<string, string>; cwd?: string }
   }
   readonly disabled: boolean
   readonly fiber?: { readonly state?: number }
@@ -235,13 +236,16 @@ export function apply(ctx: Context, config: Config) {
   })
 
   const livePhase = (entry: LoaderEntryLike): McpServerPhase => {
+    if (entry.disabled) return 'unknown'
     if (entry.fiber?.state === FIBER_ACTIVE) return 'active'
     if (entry.fiber?.state === FIBER_FAILED) return 'failed'
     if (entry.fiber?.state === FIBER_PENDING || entry.fiber?.state === FIBER_LOADING) return 'pending'
     return 'unknown'
   }
 
-  const collectLive = (): LiveMcpServer[] => {
+  const collectLive = async (warnings: string[]): Promise<LiveMcpServer[]> => {
+    const tools = ctx.get('tools') as { schemas(): { name: string }[] } | undefined
+    const toolNames = tools?.schemas().map(tool => tool.name) ?? []
     const loader = ctx.get('loader') as LoaderLike | undefined
     if (loader === undefined) return []
     const out: LiveMcpServer[] = []
@@ -255,7 +259,11 @@ export function apply(ctx: Context, config: Config) {
         id,
         serverName,
         phase: livePhase(entry),
-        managed: id.startsWith(MANAGER_ID_PREFIX),
+        managed: scope.get().mcpServers.some(server => server.id === id),
+        tools: toolNames.filter(name => name.startsWith(`mcp__${serverName}__`)),
+        children: isDockerGateway(entry.options.config)
+          ? await discoverDockerChildren(entry.options.config!, serverName, toolNames, warnings)
+          : [],
         present: true,
       })
     }
@@ -306,7 +314,7 @@ export function apply(ctx: Context, config: Config) {
             }
             const text = readTextSafe(file)
             if (text === undefined) continue
-            const { data } = parseSkillDoc(text)
+            const { data, body } = parseSkillDoc(text)
             const name = typeof data.name === 'string' && data.name !== ''
               ? data.name
               : kind === 'flat' ? entryName.slice(0, -FLAT_SKILL_EXT.length) : entryName
@@ -316,6 +324,8 @@ export function apply(ctx: Context, config: Config) {
             skills.push({
               name,
               description,
+              markdown: body,
+              source: text,
               root,
               rootLabel: label,
               kind,
@@ -437,13 +447,13 @@ export function apply(ctx: Context, config: Config) {
 
     async listMcpServers(): Promise<McpSnapshot> {
       const servers = scope.get().mcpServers
-      const live = collectLive()
+      const warnings: string[] = []
+      const live = await collectLive(warnings)
       for (const server of servers) {
         if (!live.some(entry => entry.id === server.id)) {
-          live.push({ id: server.id, serverName: server.serverName, phase: 'unknown', managed: true, present: false })
+          live.push({ id: server.id, serverName: server.serverName, phase: 'unknown', managed: true, present: false, tools: [], children: [] })
         }
       }
-      const warnings: string[] = []
       for (const entry of live) {
         if (entry.managed || entry.serverName === 'unknown') continue
         const clash = servers.find(server => server.serverName === entry.serverName)
