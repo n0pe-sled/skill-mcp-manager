@@ -287,7 +287,7 @@ declare const name = "skill-mcp-manager";
 declare const inject: string[];
 /** Config: which skill roots to manage and which patch file to project into. */
 interface Config {
-  /** Absolute or `~`-prefixed skill roots to list/manage. Empty → `~/.agents/skills`. */
+  /** Absolute or `~`-prefixed skill roots to list/manage. Empty uses the DSH and agent user roots. */
   skillRoots: string[];
   /** Absolute target patch file. Empty → `$DSH_HOME/cordis.patch.yml`. */
   mcpPatchTarget: string;

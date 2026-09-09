@@ -5,8 +5,9 @@ that adds a "Skills & MCP" section to the Settings page.
 
 - **Skills** tab: list the user's skills, create new `SKILL.md` bundles — by
   typing the instructions or **uploading a `.md` file** — and toggle each
-  skill's model / user invocation visibility. New skills are written to
-  `~/.agents/skills` (the agent-ecosystem user root), which
+  skill's model / user invocation visibility. By default, the plugin scans
+  `$DSH_HOME/skills` followed by `~/.agents/skills`, matching the filesystem
+  provider's user-root precedence. New skills are written to `$DSH_HOME/skills`, which
   `@deepseek-ai/dsh-skill-filesystem` already watches — a created or toggled
   skill appears in the next catalog observation automatically. Removal is
   *disable-only* in v1 (frontmatter switch), no file deletion.
@@ -51,7 +52,7 @@ Browser (Settings page: Skills & MCP)
    │  Typert RPC  (5 methods over ctx.remote.skillMcpManager)
    ▼
 Host half (dsh-skill-mcp-manager)
-   ├─ Skills  →  ~/.agents/skills/<name>/SKILL.md   (filesystem provider watches)
+   ├─ Skills  →  $DSH_HOME/skills/<name>/SKILL.md   (filesystem provider watches)
    └─ MCP     →  settings ns "skill-mcp-manager.mcpServers"  (durable truth)
                  └─ reconcile → ~/.dsh/cordis.patch.yml  ← insert rows
                                    └─ profile-boot's watchUserPatches (HMR)
@@ -71,9 +72,10 @@ Host half (dsh-skill-mcp-manager)
   Uploads are capped at 1 MB.
 - Toggle: rewrites only `disable-model-invocation` / `user-invocable`, body and
   every other frontmatter key preserved byte-for-byte.
-- List: scans the configured roots (`~/.agents/skills` by default) one level
-  deep — bundle dirs and flat `.md` files — parsing the same format
-  `dsh-skill-filesystem` uses.
+- List: scans the configured roots (`$DSH_HOME/skills` and `~/.agents/skills`
+  by default) one level deep — bundle dirs and flat `.md` files — parsing the
+  same format `dsh-skill-filesystem` uses. Duplicate names use the first root,
+  matching the provider's precedence.
 
 ### MCP servers
 
@@ -102,7 +104,7 @@ Host half (dsh-skill-mcp-manager)
 
 | Field | Default | Meaning |
 |---|---|---|
-| `skillRoots` | `[]` → `~/.agents/skills` | Absolute or `~` roots to list/manage |
+| `skillRoots` | `[]` → `$DSH_HOME/skills`, `~/.agents/skills` | Absolute or `~` roots to list/manage; the first root wins duplicate names and receives new skills |
 | `mcpPatchTarget` | `''` → `$DSH_HOME/cordis.patch.yml` | Patch file rows are projected into |
 
 ## Known limitations

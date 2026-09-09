@@ -1,8 +1,8 @@
 /**
  * Host (Node) half of the Skill & MCP Manager plugin.
  *
- * - **Skills**: scans the configured user skill roots (`~/.agents/skills` by
- *   default), lists them, creates new `SKILL.md` bundles (`addSkill`), and
+ * - **Skills**: scans the configured user skill roots (`$DSH_HOME/skills` and
+ *   `~/.agents/skills` by default), lists them, creates new `SKILL.md` bundles (`addSkill`), and
  *   flips each skill's model/user invocation visibility by rewriting its
  *   frontmatter (`setSkillInvocable`). No compatibility logic is needed on the
  *   catalog side: `@deepseek-ai/dsh-skill-filesystem` watches these roots and
@@ -60,7 +60,7 @@ export const inject = ['settings', 'typert']
 
 /** Config: which skill roots to manage and which patch file to project into. */
 export interface Config {
-  /** Absolute or `~`-prefixed skill roots to list/manage. Empty → `~/.agents/skills`. */
+  /** Absolute or `~`-prefixed skill roots to list/manage. Empty uses the DSH and agent user roots. */
   skillRoots: string[]
   /** Absolute target patch file. Empty → `$DSH_HOME/cordis.patch.yml`. */
   mcpPatchTarget: string
@@ -141,10 +141,13 @@ function resolveRoot(raw: string): string {
   return path.resolve(expanded)
 }
 
-/** Default managed skill root: the agent-ecosystem user root the user chose. */
+/** Default managed roots in the same precedence order as the filesystem provider. */
 function defaultSkillRoots(): string[] {
   const agentsHome = process.env.DSH_AGENTS_HOME ?? path.join(os.homedir(), '.agents')
-  return [path.join(agentsHome, 'skills')]
+  return [...new Set([
+    path.join(resolveDshHome(), 'skills'),
+    path.join(agentsHome, 'skills'),
+  ])]
 }
 
 function readTextSafe(file: string): string | undefined {
@@ -277,6 +280,7 @@ export function apply(ctx: Context, config: Config) {
     async listSkills(): Promise<SkillsSnapshot> {
       const roots: SkillRootInfo[] = []
       const skills: SkillView[] = []
+      const seenNames = new Set<string>()
       const errors: string[] = []
       skillRoots.forEach(root => {
         const label = path.basename(root) || 'skills'
@@ -306,6 +310,7 @@ export function apply(ctx: Context, config: Config) {
             const name = typeof data.name === 'string' && data.name !== ''
               ? data.name
               : kind === 'flat' ? entryName.slice(0, -FLAT_SKILL_EXT.length) : entryName
+            if (seenNames.has(name)) continue
             const description = typeof data.description === 'string' ? data.description : ''
             const invocation = invocationOf(data)
             skills.push({
@@ -318,6 +323,7 @@ export function apply(ctx: Context, config: Config) {
               modelInvocable: invocation.modelInvocable,
               userInvocable: invocation.userInvocable,
             })
+            seenNames.add(name)
           } catch (error) {
             errors.push(`${entryName}: ${error instanceof Error ? error.message : String(error)}`)
           }

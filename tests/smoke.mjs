@@ -14,7 +14,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -71,6 +71,7 @@ function makeCtx() {
 const dir = mkdtempSync(join(tmpdir(), 'dsh-skill-mcp-manager-smoke-'))
 const skillRoot = join(dir, 'agents', 'skills')
 const patchFile = join(dir, 'cordis.patch.yml')
+const originalDshHome = process.env.DSH_HOME
 const unrelatedRow = [
   '- id: web-search-deepseek',
   "  name: '@deepseek-ai/dsh-web-search-deepseek'",
@@ -135,6 +136,21 @@ try {
   assert.ok(contributions[0].invocations.length >= 5, 'all five invocations registered')
   ok('apply wiring: receiver + typert contribution')
 
+  // 3b. Default roots include the dsh-manage installation target ---------
+  const defaultDshHome = join(dir, 'default-dsh-home')
+  const defaultSkillFile = join(defaultDshHome, 'skills', 'managed-default', 'SKILL.md')
+  mkdirSync(join(defaultDshHome, 'skills', 'managed-default'), { recursive: true })
+  writeFileSync(defaultSkillFile, '---\nname: managed-default\ndescription: Installed by dsh-manage.\n---\n')
+  process.env.DSH_HOME = defaultDshHome
+  const defaultContext = makeCtx()
+  plugin.apply(defaultContext.ctx, plugin.Config({}))
+  const defaultSnapshot = await defaultContext.provided.skillMcpManager.listSkills()
+  assert.equal(defaultSnapshot.roots[0].path, join(defaultDshHome, 'skills'), '$DSH_HOME skill root has first precedence')
+  assert.ok(defaultSnapshot.roots.some(root => root.path.endsWith('/.agents/skills')), 'agent user root is also scanned')
+  assert.equal(defaultSnapshot.skills.find(skill => skill.name === 'managed-default')?.path, defaultSkillFile,
+    'default scan lists a dsh-manage skill')
+  ok('default roots include $DSH_HOME/skills before ~/.agents/skills')
+
   // 4. Skills flow ---------------------------------------------------------
   const manager = provided.skillMcpManager
   const added = await manager.addSkill({
@@ -153,6 +169,21 @@ try {
   assert.equal(snapshot.skills.length, 1, 'one skill listed')
   assert.equal(snapshot.skills[0].name, 'demo-skill', 'listed name')
   assert.equal(snapshot.skills[0].modelInvocable, true, 'default model invocable')
+
+  const lowerPriorityRoot = join(dir, 'lower-priority-skills')
+  mkdirSync(join(lowerPriorityRoot, 'demo-skill'), { recursive: true })
+  writeFileSync(join(lowerPriorityRoot, 'demo-skill', 'SKILL.md'),
+    '---\nname: demo-skill\ndescription: Lower-priority duplicate.\n---\n')
+  const duplicateContext = makeCtx()
+  plugin.apply(duplicateContext.ctx, plugin.Config({
+    skillRoots: [skillRoot, lowerPriorityRoot],
+    mcpPatchTarget: patchFile,
+  }))
+  const duplicateSnapshot = await duplicateContext.provided.skillMcpManager.listSkills()
+  assert.equal(duplicateSnapshot.skills.filter(skill => skill.name === 'demo-skill').length, 1,
+    'duplicate skill names are listed once')
+  assert.equal(duplicateSnapshot.skills.find(skill => skill.name === 'demo-skill')?.root, skillRoot,
+    'the first configured root wins a duplicate name')
 
   const conflict = await manager.addSkill({ name: 'demo-skill', description: 'x', body: 'y' })
   assert.equal(conflict.ok, false, 'duplicate add rejected')
@@ -302,6 +333,8 @@ try {
   assert.equal(parsed.body, 'b\n', 'parseSkillDoc body')
   ok('frontmatter helper exports')
 } finally {
+  if (originalDshHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = originalDshHome
   rmSync(dir, { recursive: true, force: true })
 }
 
