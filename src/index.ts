@@ -9,11 +9,16 @@
  *   invalidates discovery on exactly these changes.
  * - **MCP servers**: the durable source of truth is the `skill-mcp-manager`
  *   settings namespace (`mcpServers`). After every change the manager projects
- *   the set into `$DSH_HOME/cordis.patch.yml` as `@deepseek-ai/dsh-mcp-client`
- *   insert rows (never touching rows it does not own; never rewriting an
- *   already-in-sync file). DSH's own user-patch HMR watcher
- *   (`watchUserPatches` in app-boot) hot-applies that file, so added servers
- *   connect and removed ones disconnect without a restart.
+ *   the enabled set into `$DSH_HOME/cordis.patch.yml` as
+ *   `@deepseek-ai/dsh-mcp-client` insert rows (never touching rows it does not
+ *   own; never rewriting an already-in-sync file). DSH's own user-patch HMR
+ *   watcher (`watchUserPatches` in app-boot) hot-applies that file, so added
+ *   servers connect and removed ones disconnect without a restart; disabling a
+ *   server drops its row (the live instance is disposed) and re-enabling it
+ *   re-adds the row (fresh mount).
+ * - **MCP logs**: one logger exporter captures the host's log stream into a
+ *   ring buffer; `getMcpServerLogs` serves the per-server tail by matching the
+ *   bridge's `mcp-client(<serverName>): ` message prefix.
  *
  * All reads/writes across both surfaces flow through a runtime-registered
  * Typert endpoint (`skillMcpManager`) consumed by the browser half.
@@ -39,18 +44,19 @@ import {
   buildSkillDoc, buildSkillDocFromParts, deriveSkillFromSource, FLAT_SKILL_EXT, invocationOf, isValidSkillName,
   parseSkillDoc, SKILL_FILE, setSkillInvocation,
 } from './skill-fmt.ts'
-import { MCP_CLIENT_NAME, planPatch, rowIdFor, validateServerSet } from './mcp-config.ts'
+import { MCP_CLIENT_NAME, SERVER_NAME_RE, planPatch, rowIdFor, validateServerSet } from './mcp-config.ts'
 import { DESCRIPTORS, SERVICE } from './shared/remote.ts'
 import type {
-  AddSkillInput, LiveMcpServer, McpSaveOutcome, McpServerDefinition, McpSnapshot,
-  McpServerPhase, SetSkillInvocableInput, SkillMutationOutcome, SkillRootInfo, SkillsSnapshot, SkillUploadPreview,
+  AddSkillInput, LiveMcpServer, McpLogsInput, McpLogsSnapshot, McpSaveOutcome, McpServerDefinition, McpSnapshot,
+  McpServerPhase, McpLogLevel, SetSkillInvocableInput, SkillMutationOutcome, SkillRootInfo, SkillsSnapshot, SkillUploadPreview,
   SkillView, SourceMarkdownFile,
 } from './shared/remote.ts'
 
 export { buildSkillDoc, parseSkillDoc, setSkillInvocation, deriveSkillFromSource, slugifySkillName } from './skill-fmt.ts'
 export { planPatch, validateServerSet } from './mcp-config.ts'
+export { splitCommandLine } from './shlex.ts'
 export type {
-  AddSkillInput, LiveMcpServer, McpSaveOutcome, McpServerDefinition, McpSnapshot,
+  AddSkillInput, LiveMcpServer, McpLogsInput, McpLogsSnapshot, McpSaveOutcome, McpServerDefinition, McpSnapshot,
   McpServerPhase, SetSkillInvocableInput, SkillMutationOutcome, SkillRootInfo, SkillsSnapshot, SkillView,
 } from './shared/remote.ts'
 
@@ -82,6 +88,7 @@ const mcpServerSchema = Schema.object({
   id: Schema.string(),
   serverName: Schema.string(),
   transport: Schema.union(['stdio', 'streamable-http']),
+  enabled: Schema.boolean().default(true),
   command: Schema.string().default(''),
   args: Schema.array(Schema.string()).default([]),
   env: Schema.dict(Schema.string()).default({}),
@@ -132,6 +139,7 @@ interface SkillMcpManagerReceiver {
   setSkillInvocable(input: SetSkillInvocableInput): Promise<SkillMutationOutcome>
   listMcpServers(): Promise<McpSnapshot>
   saveMcpServers(servers: McpServerDefinition[]): Promise<McpSaveOutcome>
+  getMcpServerLogs(input: McpLogsInput): Promise<McpLogsSnapshot>
 }
 
 /** Root helper: expand `~`, resolve against cwd, require a directory. */
@@ -182,6 +190,77 @@ function isWithinRoot(root: string, target: string, name: string): boolean {
   return relDir === name && !relDir.startsWith('..') && !path.isAbsolute(relDir)
 }
 
+// ---- Bridge log capture ---------------------------------------------------
+//
+// The mcp-client bridge logs every lifecycle event (connect, reconnect backoff,
+// tool syncs, give-ups) through ctx.logger with a stable `mcp-client(<name>): `
+// prefix. One logger exporter captures the host's log stream into a bounded
+// ring buffer; the per-server view filters on that prefix. In-memory only — a
+// restart starts a fresh buffer. stdio children's own stderr is NOT captured
+// (the MCP SDK pipes it to the host process), so this view is the bridge's
+// side of the story.
+
+const MAX_LOG_BUFFER = 2000
+/** Per-record cap on the formatted text (cordis exporters default to 10 KB). */
+const MAX_LOG_RECORD_CHARS = 4096
+
+interface CapturedLog {
+  readonly ts: number
+  readonly level: McpLogLevel
+  readonly text: string
+}
+
+/** Structured log record as delivered to a cordis logger exporter. */
+interface LoggerMessage {
+  readonly ts: number
+  readonly type: 'error' | 'info' | 'warn' | 'debug'
+  readonly args: readonly unknown[]
+}
+
+function stringifyLogArg(value: unknown, depth = 0): string {
+  if (typeof value === 'string') return value
+  if (value instanceof Error) return value.stack ?? `${value.name}: ${value.message}`
+  if (typeof value === 'bigint') return `${value}n`
+  if (typeof value === 'object' && value !== null) {
+    if (depth > 3) return '…'
+    try {
+      return JSON.stringify(value, (_key, nested: unknown) => typeof nested === 'bigint' ? `${nested}n` : nested)
+    } catch {
+      return String(value)
+    }
+  }
+  return String(value)
+}
+
+/**
+ * Render one log record's args to a single line. When the first arg is a
+ * printf-style format string, substitute its placeholders; otherwise join the
+ * stringified args. Unknown codes stay verbatim instead of eating arguments.
+ */
+function formatLogArgs(args: readonly unknown[]): string {
+  if (args.length === 0) return ''
+  const [first, ...rest] = args
+  if (typeof first === 'string' && rest.length > 0 && /%[a-zA-Z%]/.test(first)) {
+    let index = 0
+    const substituted = first.replace(/%([a-zA-Z%])/g, (match, code: string) => {
+      if (code === '%') return '%'
+      if (index >= rest.length) return match
+      const value = rest[index]
+      index += 1
+      return stringifyLogArg(value)
+    })
+    const tail = rest.slice(index)
+    if (tail.length === 0) return substituted
+    return `${substituted} ${tail.map(value => stringifyLogArg(value)).join(' ')}`
+  }
+  return args.map(value => stringifyLogArg(value)).join(' ')
+}
+
+/** The log label the bridge prefixes every message with, per server. */
+export function bridgeLogPrefix(serverName: string): string {
+  return `mcp-client(${serverName}): `
+}
+
 export function apply(ctx: Context, config: Config) {
   const skillRoots = (config.skillRoots.length > 0 ? config.skillRoots : defaultSkillRoots())
     .map(resolveRoot)
@@ -190,6 +269,38 @@ export function apply(ctx: Context, config: Config) {
     : path.join(resolveDshHome(), 'cordis.patch.yml')
 
   const scope = ctx.settings.register(NAMESPACE, sectionSchema)
+
+  // Capture MCP bridge log records for the per-server log view. The exporter is
+  // bound to this plugin's fiber via ctx.effect — registration is withdrawn on
+  // unmount, and the buffer dies with the plugin (in-memory by design).
+  // `levels.default` must be DEBUG (3; error 0 < info 1 < warn 2 < debug 3):
+  // the exporter default is INFO, and a message is skipped when the exporter
+  // threshold is BELOW the message level, which would drop warn/debug lines.
+  const capturedLogs: CapturedLog[] = []
+  const capturedSince = Date.now()
+  let logCaptureEnabled = false
+  try {
+    ctx.logger.exporter({
+      levels: { default: 3 },
+      export: (message: LoggerMessage) => {
+        const text = formatLogArgs(message.args)
+        if (!/^mcp-client\([A-Za-z0-9_-]{1,32}\): /.test(text)) return
+        capturedLogs.push({
+          ts: message.ts,
+          level: message.type,
+          text: text.slice(0, MAX_LOG_RECORD_CHARS),
+        })
+        if (capturedLogs.length > MAX_LOG_BUFFER) {
+          capturedLogs.splice(0, capturedLogs.length - MAX_LOG_BUFFER)
+        }
+      },
+    })
+    logCaptureEnabled = true
+  } catch (error) {
+    // A logger without an exporter API must not break the manager; the log
+    // view then simply reports "no capture" instead of failing.
+    ctx.logger.warn('[skill-mcp-manager] logger exporter unavailable, MCP log capture is disabled: %s', String(error))
+  }
 
   /** Locate one skill file under the managed roots; returns path + kind. */
   const locateSkill = (
@@ -496,6 +607,30 @@ export function apply(ctx: Context, config: Config) {
       await reconcile()
       const applied = planPatch(readTextSafe(patchTarget), normalized).reason === 'in-sync'
       return { ok: true, saved: true, applied, patchPath: patchTarget }
+    },
+
+    async getMcpServerLogs(input: McpLogsInput): Promise<McpLogsSnapshot> {
+      const serverName = input.serverName
+      if (!SERVER_NAME_RE.test(serverName)) {
+        return {
+          serverName, lines: [], total: 0, capturedSince, capturing: logCaptureEnabled,
+        }
+      }
+      const limit = Math.min(Math.max(Math.trunc(input.limit ?? 200), 1), 1000)
+      const prefix = bridgeLogPrefix(serverName)
+      const matching = capturedLogs.filter(line => line.text.startsWith(prefix))
+      return {
+        serverName,
+        lines: matching.slice(-limit).map(line => ({
+          ts: line.ts,
+          level: line.level,
+          // The view already names the server; drop the bridge's own label.
+          text: line.text.slice(prefix.length),
+        })),
+        total: matching.length,
+        capturedSince,
+        capturing: logCaptureEnabled,
+      }
     },
   }
   receiver.typertRemote = bindTypertRemote(receiver, SERVICE, { namespace: SERVICE })

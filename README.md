@@ -12,11 +12,11 @@ that adds a "Skills & MCP" section to the Settings page.
   skill appears in the next catalog observation automatically. Removal is
   *disable-only* in v1 (frontmatter switch), no file deletion.
 - **MCP Servers** tab: list configured servers with live connection state, add
-  (stdio or streamable-http), and remove. Servers persist to the machine-global
+  (stdio or streamable-http), edit, enable/disable, remove, and review the
+  bridge's recent log lines per server. Servers persist to the machine-global
   `~/.dsh/cordis.patch.yml` as `@deepseek-ai/dsh-mcp-client` instances; DSH's
-  own user-patch HMR watcher hot-applies the file, so **adds and removes go
-  live without restarting the GUI** — verified end-to-end against a real
-  harness instance.
+  own user-patch HMR watcher hot-applies the file, so **adds, edits, disables
+  and removes go live without restarting the GUI**.
 
 ## Install
 
@@ -49,7 +49,7 @@ provides all `@deepseek-ai` runtime deps):
 
 ```
 Browser (Settings page: Skills & MCP)
-   │  Typert RPC  (5 methods over ctx.remote.skillMcpManager)
+   │  Typert RPC  (7 methods over ctx.remote.skillMcpManager)
    ▼
 Host half (dsh-skill-mcp-manager)
    ├─ Skills  →  $DSH_HOME/skills/<name>/SKILL.md   (filesystem provider watches)
@@ -93,6 +93,20 @@ shows the original file, including all frontmatter.
 - A loaded plugin is labeled **loaded**, since loader activation alone does not
   prove a successful MCP connection. Child tool counts indicate detected tools,
   not a live health check. Docker child servers are managed through Docker.
+- **Edit** loads the saved definition into the add form (the `serverName` is
+  frozen there — tool names derive from it; rename by removing and re-adding).
+  **Enabled** projects the server into the patch layer; disabling keeps the
+  definition in settings but removes the row, which disposes the live instance
+  until it is re-enabled.
+- **Arguments** are edited one per row: `+` appends a row, `−` removes one.
+  Pasting a full command into the Command field (or a multi-token string into
+  an argument row) splits it shell-style — quotes and escapes honored — into
+  the rows it belongs in.
+- **Logs** opens the bridge's recent log lines for that server (connects,
+  reconnect backoff, tool syncs, failures), captured from the host's logger
+  into an in-memory ring buffer (~2000 MCP bridge lines, since plugin activation).
+  Unrelated host log records are not retained. The
+  stdio server's own console output is not captured; restart clears the buffer.
 - Remove is available only for connections owned by this panel. Optional
   connection fields are grouped under Advanced options.
 - Docker gateways with `--servers` show the selected names. Other gateway types

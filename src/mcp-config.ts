@@ -165,6 +165,10 @@ function sameManagedSet(a: readonly unknown[], b: readonly unknown[]): boolean {
  * when (a) managed settings need to be written, or (b) stale managed rows must
  * be removed — never merely to re-serialize an untouched file (that would strip
  * the user's comments on every startup).
+ *
+ * Disabled servers are not projected: settings is the durable truth, and the
+ * absence of the row is what the patch HMR turns into a live dispose. Re-listing
+ * a disabled server later re-adds the row and remounts it.
  */
 export function planPatch(
   existingText: string | undefined,
@@ -172,7 +176,7 @@ export function planPatch(
 ): PatchPlan {
   const base = parsePatchList(existingText)
   const existingManaged = collectManagedRows(base)
-  const newManaged = managed.map(managedRowFor)
+  const newManaged = managed.filter(server => server.enabled !== false).map(managedRowFor)
   const needToWrite = newManaged.length > 0
   const hasStale = existingManaged.length > 0 && !needToWrite
   if (!needToWrite && !hasStale) {

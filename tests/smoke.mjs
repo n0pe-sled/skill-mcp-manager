@@ -52,18 +52,32 @@ function makeCtx() {
   const provided = {}
   const contributions = []
   const events = new Map()
+  /** Registered logger exporters — push fake messages here to test log capture. */
+  const exporters = []
   return {
     scope,
     provided,
     contributions,
     events,
+    exporters,
     ctx: {
       settings: { register: () => scope },
       typert: { register: (contribution) => contributions.push(contribution) },
       provide: (key, value) => { provided[key] = value },
       get: () => undefined,
       on: (event, handler) => events.set(event, handler),
-      logger: { info: () => {}, warn: () => {} },
+      logger: {
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        exporter: (exp) => {
+          exporters.push(exp)
+          return () => {
+            const index = exporters.indexOf(exp)
+            if (index >= 0) exporters.splice(index, 1)
+          }
+        },
+      },
     },
   }
 }
@@ -87,6 +101,7 @@ const serverDef = (overrides = {}) => ({
   id: 'dsh-mcp-manager-github',
   serverName: 'github',
   transport: 'stdio',
+  enabled: true,
   command: 'npx',
   args: ['-y', '@modelcontextprotocol/server-github'],
   env: { GITHUB_TOKEN: 'abc' },
@@ -127,13 +142,13 @@ try {
   ok('pure helpers: validateServerSet + planPatch empty no-op')
 
   // 3. apply() wiring ------------------------------------------------------
-  const { ctx, scope, provided, contributions } = makeCtx()
+  const { ctx, scope, provided, contributions, exporters } = makeCtx()
   const config = plugin.Config({ skillRoots: [skillRoot], mcpPatchTarget: patchFile })
   plugin.apply(ctx, config)
   assert.ok(provided.skillMcpManager, 'receiver provided under skillMcpManager')
   assert.equal(contributions.length, 1, 'one typert contribution registered')
   assert.equal(contributions[0].package, 'dsh-skill-mcp-manager', 'contribution package')
-  assert.ok(contributions[0].invocations.length >= 5, 'all five invocations registered')
+  assert.ok(contributions[0].invocations.length >= 7, 'all invocations registered')
   ok('apply wiring: receiver + typert contribution')
 
   // 3b. Default roots include the dsh-manage installation target ---------
@@ -329,6 +344,71 @@ try {
   assert.ok(!afterRemove.includes("name: '@deepseek-ai/dsh-mcp-client'"), 'managed row removed')
   assert.ok(afterRemove.includes('disabled: true'), 'unrelated row still preserved')
   ok('mcp flow: idempotence + removal preserves unrelated rows')
+
+  // 5b. MCP flow — enable/disable toggle ------------------------------------
+  const disabledSave = await manager.saveMcpServers([serverDef({ enabled: false })])
+  assert.equal(disabledSave.ok, true, 'disabled save ok')
+  assert.equal(scope.get().mcpServers[0].enabled, false, 'settings keeps the disabled definition')
+  const disabledPatch = readFileSync(patchFile, 'utf8')
+  assert.ok(!disabledPatch.includes('dsh-mcp-manager-github'), 'disabled server is not projected into the patch')
+  assert.equal(disabledSave.applied, true, 'disabling rewrites the patch layer')
+
+  const reEnabled = await manager.saveMcpServers([serverDef()])
+  assert.equal(reEnabled.ok, true, 're-enable save ok')
+  assert.ok(readFileSync(patchFile, 'utf8').includes('dsh-mcp-manager-github'), 're-enabled server is projected again')
+  await manager.saveMcpServers([])
+  ok('mcp flow: disabled servers stay in settings but leave the patch layer')
+
+  // 5c. MCP flow — legacy definitions without `enabled` default to enabled --
+  const legacyDef = { ...serverDef() }
+  delete legacyDef.enabled
+  const saveCodec = contributions[0].invocations.find(d => d.method === 'saveMcpServers').parameters[0].codec.schema
+  const parsedLegacy = saveCodec.parse([legacyDef])
+  assert.equal(parsedLegacy[0].enabled, true, 'missing enabled parses as true (pre-toggle saves stay live)')
+  assert.throws(() => saveCodec.parse([{ ...legacyDef, enabled: 'false' }]), /enabled must be a boolean/)
+  ok('mcp flow: backward-compatible `enabled` default')
+
+  // 5d. Command-line tokenizer ----------------------------------------------
+  const { splitCommandLine } = plugin
+  assert.deepEqual(splitCommandLine('npx -y @modelcontextprotocol/server-github'),
+    ['npx', '-y', '@modelcontextprotocol/server-github'], 'plain command split')
+  assert.deepEqual(splitCommandLine('--flag="a b" -x'), ['--flag=a b', '-x'], 'double-quoted value is one token')
+  assert.deepEqual(splitCommandLine("a 'b c' d"), ['a', 'b c', 'd'], 'single-quoted group is one token')
+  assert.deepEqual(splitCommandLine('path\\ with\\ space'), ['path with space'], 'backslash escapes a space')
+  assert.deepEqual(splitCommandLine("unterminated 'quote"), ['unterminated', 'quote'], 'unterminated quote keeps the tail')
+  assert.deepEqual(splitCommandLine('unterminated "quote'), ['unterminated', 'quote'], 'unterminated double quote keeps the tail once')
+  assert.deepEqual(splitCommandLine("''"), [''], 'empty quoted argument is preserved')
+  assert.deepEqual(splitCommandLine(''), [], 'empty input has no tokens')
+  ok('shlex: splitCommandLine tokenizes pasted commands')
+
+  // 5e. Per-server bridge log capture ---------------------------------------
+  assert.equal(exporters.length, 1, 'one logger exporter registered at apply')
+  assert.equal(exporters[0].levels?.default, 3, 'exporter threshold captures every severity')
+  const emit = (message) => exporters.forEach(exp => exp.export(message))
+  emit({ ts: 1000, type: 'warn', args: ['mcp-client(github): connection attempt failed: boom'] })
+  emit({ ts: 2000, type: 'info', args: ['mcp-client(other): connected'] })
+  emit({ ts: 3000, type: 'error', args: ['unrelated: %s', 'noise'] })
+  emit({ ts: 4000, type: 'error', args: ['mcp-client(github): tool %s failed', 'sync', { code: 7 }] })
+  const logs = await manager.getMcpServerLogs({ serverName: 'github' })
+  assert.equal(logs.capturing, true, 'log capture reports live')
+  assert.equal(logs.total, 2, 'only the matching server lines are counted')
+  assert.equal(logs.lines[0].text, 'connection attempt failed: boom', 'bridge label stripped from the text')
+  assert.equal(logs.lines[0].level, 'warn')
+  assert.equal(logs.lines[1].text, 'tool sync failed {"code":7}', 'printf-style args are rendered')
+  assert.equal(logs.lines[1].level, 'error')
+  const limited = await manager.getMcpServerLogs({ serverName: 'other', limit: 0 }) // clamped to 1..1000
+  assert.equal(limited.lines.length, 1, 'limit is clamped to at least one line')
+  for (let i = 0; i < 5; i += 1) {
+    emit({ ts: 5000 + i, type: 'info', args: [`mcp-client(flood): line ${i}`] })
+  }
+  const tail = await manager.getMcpServerLogs({ serverName: 'flood', limit: 2 })
+  assert.equal(tail.total, 5, 'total counts all buffered lines')
+  assert.deepEqual(tail.lines.map(line => line.text), ['line 3', 'line 4'], 'limit returns the newest tail')
+  const logsCodec = contributions[0].invocations.find(d => d.method === 'getMcpServerLogs').result.schema
+  assert.deepEqual(logsCodec.parse(logs), logs, 'logs snapshot round-trips the strict codec')
+  for (let i = 0; i < 2100; i += 1) emit({ ts: 6000 + i, type: 'info', args: ['unrelated host record'] })
+  assert.equal((await manager.getMcpServerLogs({ serverName: 'github' })).total, 2, 'unrelated host logs are not retained or allowed to evict bridge logs')
+  ok('mcp logs: prefix filter, formatting, limit clamp, codec round-trip')
 
   // 6. Skill root layout sanity ---------------------------------------------
   const entries = readdirSync(skillRoot)

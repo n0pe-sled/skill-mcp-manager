@@ -20,7 +20,7 @@ import { SkillMcpManagerPanel } from './SkillMcpManagerPanel.tsx'
 import type { SkillMcpManagerInjected } from './SkillMcpManagerPanel.tsx'
 import { DESCRIPTORS, SERVICE } from '../shared/remote.ts'
 import type {
-  AddSkillInput, McpSaveOutcome, McpServerDefinition, McpSnapshot,
+  AddSkillInput, McpLogsInput, McpLogsSnapshot, McpSaveOutcome, McpServerDefinition, McpSnapshot,
   RemoteCallOutcome, SetSkillInvocableInput, SkillMutationOutcome, SkillsSnapshot,
   SkillUploadPreview, SourceMarkdownFile,
 } from '../shared/remote.ts'
@@ -34,6 +34,7 @@ interface SkillMcpManagerNamespace {
   setSkillInvocable(input: SetSkillInvocableInput): Promise<RemoteResult<SkillMutationOutcome>>
   listMcpServers(): Promise<RemoteResult<McpSnapshot>>
   saveMcpServers(servers: McpServerDefinition[]): Promise<RemoteResult<McpSaveOutcome>>
+  getMcpServerLogs(input: McpLogsInput): Promise<RemoteResult<McpLogsSnapshot>>
 }
 
 export type {
@@ -89,6 +90,7 @@ export function apply(ctx: ClientContext): void {
     setSkillInvocable: input => call(ns => ns.setSkillInvocable.bind(ns), input),
     listMcpServers: () => call(ns => ns.listMcpServers.bind(ns)),
     saveMcpServers: servers => call(ns => ns.saveMcpServers.bind(ns), servers),
+    getMcpServerLogs: input => call(ns => ns.getMcpServerLogs.bind(ns), input),
   }
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({

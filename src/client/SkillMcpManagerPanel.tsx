@@ -4,7 +4,8 @@
  * - **Skills**: list the managed skill roots, add a new `SKILL.md` bundle, and
  *   toggle each skill's model/user invocation visibility (frontmatter rewrite).
  * - **MCP Servers**: list the managed servers plus their live loader status,
- *   add (stdio / streamable-http), and remove. Every save persists the whole
+ *   add (stdio / streamable-http), edit, enable/disable, remove, and inspect
+ *   the bridge's recent log lines per server. Every save persists the whole
  *   server set through the settings namespace and hot-applies `$DSH_HOME/
  *   cordis.patch.yml` via the host reconcile.
  *
@@ -16,10 +17,11 @@ import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Fragment, useEffect, useRef, useState } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
-  AddSkillInput, McpSaveOutcome, McpServerDefinition, McpServerPhase,
+  AddSkillInput, McpLogsInput, McpLogsSnapshot, McpSaveOutcome, McpServerDefinition, McpServerPhase,
   McpSnapshot, RemoteCallOutcome, SetSkillInvocableInput, SkillMutationOutcome, SkillsSnapshot,
   SkillUploadPreview, SourceMarkdownFile,
 } from '../shared/remote.ts'
+import { splitCommandLine } from '../shlex.ts'
 
 /** Registration-side face the settings.section entry injects. */
 export interface SkillMcpManagerInjected {
@@ -29,6 +31,7 @@ export interface SkillMcpManagerInjected {
   setSkillInvocable(input: SetSkillInvocableInput): Promise<RemoteCallOutcome<SkillMutationOutcome>>
   listMcpServers(): Promise<RemoteCallOutcome<McpSnapshot>>
   saveMcpServers(servers: McpServerDefinition[]): Promise<RemoteCallOutcome<McpSaveOutcome>>
+  getMcpServerLogs(input: McpLogsInput): Promise<RemoteCallOutcome<McpLogsSnapshot>>
 }
 
 /** Client-visible outcome of one Remote call (re-exported for the entry). */
@@ -322,6 +325,48 @@ const styles = {
     cursor: 'pointer',
     whiteSpace: 'nowrap' as const,
   } as const,
+  argRow: {
+    display: 'flex',
+    gap: '6px',
+    alignItems: 'center',
+  } as const,
+  argInput: {
+    flex: 1,
+    padding: '6px 10px',
+    fontSize: '13px',
+    fontFamily: MONOSPACE,
+    color: 'var(--dsw-alias-label-primary)',
+    background: 'var(--dsw-alias-bg-layer-1)',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: '6px',
+    boxSizing: 'border-box' as const,
+    minWidth: 0,
+  },
+  rowButton: {
+    padding: '6px 10px',
+    fontSize: '13px',
+    lineHeight: '1',
+    borderRadius: '5px',
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-bg-layer-2)',
+    color: 'var(--dsw-alias-label-secondary)',
+    cursor: 'pointer',
+    flexShrink: 0,
+  } as const,
+  logPane: {
+    marginTop: '4px',
+    padding: '10px 12px',
+    maxHeight: '320px',
+    overflow: 'auto',
+    background: 'var(--dsw-alias-bg-layer-2)',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: '6px',
+    fontFamily: MONOSPACE,
+    fontSize: '11.5px',
+    lineHeight: '1.5',
+    whiteSpace: 'pre-wrap' as const,
+    wordBreak: 'break-word' as const,
+  } as const,
 }
 
 /** Chip color per live phase (fall back on the alias if a var is unknown). */
@@ -358,6 +403,7 @@ function emptyMcpDraft(): McpServerDefinition {
     id: '',
     serverName: '',
     transport: 'stdio',
+    enabled: true,
     command: '',
     args: [],
     env: {},
@@ -421,6 +467,16 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
   const [mcpDraft, setMcpDraft] = useState<McpServerDefinition>(emptyMcpDraft)
   const [mcpActionNote, setMcpActionNote] = useState<{ ok: boolean; text: string } | null>(null)
   const [saving, setSaving] = useState(false)
+  /** `add` shows the blank form; `edit` targets the server listed in `editId`. */
+  const [draftMode, setDraftMode] = useState<'add' | 'edit'>('add')
+  const [editId, setEditId] = useState<string | null>(null)
+  /** The one open per-server log pane (null = all closed). */
+  const [logPane, setLogPane] = useState<{
+    serverName: string
+    loading: boolean
+    error: string | null
+    snapshot: McpLogsSnapshot | null
+  } | null>(null)
 
   const refreshSkills = async () => {
     setSkillsLoading(true)
@@ -469,6 +525,7 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
     }
     setSaving(false)
     window.setTimeout(() => { void refreshMcp() }, 1500)
+    return outcome.ok && outcome.value.ok
   }
 
   const handleAddSkill = async () => {
@@ -597,25 +654,117 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
 
   const handleRemoveServer = async (id: string) => {
     const next = mcp.servers.filter(server => server.id !== id)
+    if (editId === id) handleCancelEdit()
     void saveMcp(next)
   }
 
-  const handleAddServer = async () => {
+  /** Enable/disable one server; the patch layer follows on the next save. */
+  const handleToggleServer = (id: string) => {
+    const next = mcp.servers.map(server => server.id === id ? { ...server, enabled: !server.enabled } : server)
+    void saveMcp(next)
+  }
+
+  /** Load one saved server into the form for editing. */
+  const handleEditServer = (id: string) => {
+    const server = mcp.servers.find(entry => entry.id === id)
+    if (server === undefined) return
+    setMcpDraft({ ...server, args: [...server.args], env: { ...server.env }, headers: { ...server.headers } })
+    setEditId(id)
+    setDraftMode('edit')
+    setMcpActionNote(null)
+    setLogPane(null)
+  }
+
+  const handleCancelEdit = () => {
+    setMcpDraft(emptyMcpDraft())
+    setEditId(null)
+    setDraftMode('add')
+  }
+
+  /** Commit the shared add/edit form into the saved set. */
+  const handleSaveServer = async () => {
     const serverName = mcpDraft.serverName.trim()
-    if (serverName === '') {
+    if (draftMode === 'add' && serverName === '') {
       setMcpActionNote({ ok: false, text: 'serverName is required ([A-Za-z0-9_-], max 32 chars).' })
       return
     }
-    if (mcp.servers.some(server => server.serverName === serverName)) {
+    if (draftMode === 'add' && mcp.servers.some(server => server.serverName === serverName)) {
       setMcpActionNote({ ok: false, text: `serverName "${serverName}" is already configured.` })
       return
     }
-    const next: McpServerDefinition = {
+    // Trim whitespace-only rows; one pasted arg may legitimately repeat another.
+    const cleaned: McpServerDefinition = {
       ...mcpDraft,
-      id: `dsh-mcp-manager-${serverName}`,
       serverName,
+      args: mcpDraft.args.filter(arg => arg.trim() !== ''),
     }
-    void saveMcp([...mcp.servers, next])
+    const next = draftMode === 'edit'
+      ? mcp.servers.map(server => server.id === editId ? { ...cleaned, id: editId, serverName: server.serverName } : server)
+      : [...mcp.servers, { ...cleaned, id: `dsh-mcp-manager-${serverName}` }]
+    const saved = await saveMcp(next)
+    if (saved && draftMode === 'edit') handleCancelEdit()
+  }
+
+  // ---- Argument rows ------------------------------------------------------
+
+  const setArgAt = (index: number, value: string) => {
+    setMcpDraft(current => ({ ...current, args: current.args.map((arg, i) => i === index ? value : arg) }))
+  }
+  const addArgRow = () => {
+    setMcpDraft(current => ({ ...current, args: [...current.args, ''] }))
+  }
+  const removeArgAt = (index: number) => {
+    setMcpDraft(current => ({ ...current, args: current.args.filter((_, i) => i !== index) }))
+  }
+
+  /**
+   * Paste into an argument row: a multi-token paste splits into one token per
+   * row (the first fills the pasted row, the rest splice in after it).
+   */
+  const handleArgPaste = (index: number, event: React.ClipboardEvent<HTMLInputElement>) => {
+    const tokens = splitCommandLine(event.clipboardData.getData('text'))
+    if (tokens.length <= 1) return
+    event.preventDefault()
+    setMcpDraft(current => ({
+      ...current,
+      args: [...current.args.slice(0, index), ...tokens, ...current.args.slice(index + 1)],
+    }))
+  }
+
+  /**
+   * Paste into the Command field: a full command line (`npx -y @server`) fills
+   * the command with its first token and the rest become argument rows.
+   */
+  const handleCommandPaste = (event: React.ClipboardEvent<HTMLInputElement>) => {
+    const tokens = splitCommandLine(event.clipboardData.getData('text'))
+    if (tokens.length <= 1) return
+    event.preventDefault()
+    setMcpDraft(current => ({
+      ...current,
+      command: tokens[0] ?? '',
+      args: [...current.args, ...tokens.slice(1)],
+    }))
+  }
+
+  // ---- Per-server logs ----------------------------------------------------
+
+  const refreshLogs = async (serverName: string) => {
+    setLogPane(current => current?.serverName === serverName ? { ...current, loading: true, error: null } : current)
+    const outcome = await props.getMcpServerLogs({ serverName })
+    setLogPane(current => {
+      if (current?.serverName !== serverName) return current // pane closed meanwhile
+      if (outcome.ok) return { serverName, loading: false, error: null, snapshot: outcome.value }
+      return { serverName, loading: false, error: outcome.error, snapshot: null }
+    })
+  }
+
+  const handleToggleLogs = (serverName: string) => {
+    if (logPane?.serverName === serverName) {
+      setLogPane(null)
+      return
+    }
+    setLogPane({ serverName, loading: false, error: null, snapshot: null })
+    void refreshLogs(serverName)
   }
 
   const phaseBadge = (phase: McpServerPhase) => (
@@ -920,21 +1069,75 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
               {mcp.live.length === 0 && mcpError === null
                 ? <p style={styles.status} role="status">No MCP servers are configured or running.</p>
                 : null}
-              {mcp.live.map(server => (
+              {mcp.live.map(server => {
+                const def = mcp.servers.find(entry => entry.id === server.id)
+                const isEnabled = def?.enabled ?? true
+                return (
                 <div key={`${server.id}-${server.present ? 'live' : 'cfg'}`} style={styles.item}>
                   <div style={{ ...styles.row, flexWrap: 'wrap' }}>
                     <div style={styles.itemLine}>
                       <span style={styles.itemTitle}>{server.serverName}</span>
-                      {phaseBadge(server.phase)}
+                      {isEnabled
+                        ? phaseBadge(server.phase)
+                        : <span style={styles.badge}>disabled</span>}
                       <span style={styles.badge}>{server.managed ? 'managed' : 'external'}</span>
-                      {!server.present ? <span style={styles.badge}>pending apply</span> : null}
+                      {!server.present && isEnabled ? <span style={styles.badge}>pending apply</span> : null}
                     </div>
                     {server.managed ? (
-                      <button type="button" style={{ ...styles.dangerButton, ...(saving ? styles.disabled : {}) }}
-                        disabled={saving} aria-label={`Remove ${server.serverName}`}
-                        onClick={() => void handleRemoveServer(server.id)}>Remove</button>
+                      <div style={styles.itemLine}>
+                        <label style={styles.switchRow} title="Enable or disable this server">
+                          <input
+                            type="checkbox"
+                            checked={isEnabled}
+                            disabled={saving}
+                            aria-label={`Enable ${server.serverName}`}
+                            onChange={() => handleToggleServer(server.id)}
+                          />
+                          <span style={styles.hint}>Enabled</span>
+                        </label>
+                        <button type="button" style={styles.button} disabled={saving}
+                          aria-label={`Edit ${server.serverName}`}
+                          onClick={() => handleEditServer(server.id)}>Edit</button>
+                        <button type="button" style={styles.button} disabled={saving}
+                          aria-label={`View logs for ${server.serverName}`}
+                          onClick={() => handleToggleLogs(server.serverName)}>
+                          {logPane?.serverName === server.serverName ? 'Hide logs' : 'Logs'}
+                        </button>
+                        <button type="button" style={{ ...styles.dangerButton, ...(saving ? styles.disabled : {}) }}
+                          disabled={saving} aria-label={`Remove ${server.serverName}`}
+                          onClick={() => void handleRemoveServer(server.id)}>Remove</button>
+                      </div>
                     ) : <span style={styles.hint}>Managed outside this panel</span>}
                   </div>
+                  {logPane?.serverName === server.serverName ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
+                      <div style={styles.itemLine}>
+                        <span style={styles.hint}>
+                          Bridge logs since {new Date(logPane.snapshot?.capturedSince ?? Date.now()).toLocaleTimeString()}.
+                          The server&apos;s own console output is not captured here.
+                        </span>
+                        <button type="button" style={styles.button} disabled={logPane.loading}
+                          onClick={() => void refreshLogs(server.serverName)}>
+                          {logPane.loading ? 'Loading…' : 'Refresh'}
+                        </button>
+                      </div>
+                      {logPane.error !== null
+                        ? <p style={styles.error} role="status">{logPane.error}</p>
+                        : null}
+                      {logPane.snapshot !== null && logPane.snapshot.lines.length === 0
+                        ? <p style={styles.hint}>No log lines captured for this server yet.</p>
+                        : null}
+                      {logPane.snapshot !== null && logPane.snapshot.lines.length > 0 ? (
+                        <div style={styles.logPane}>
+                          {logPane.snapshot.lines.map((line, index) => (
+                            <div key={`${line.ts}-${index}`}>
+                              {`[${new Date(line.ts).toLocaleTimeString()}] ${line.level.toUpperCase()} ${line.text}`}
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <details style={{ marginTop: '8px' }}>
                     <summary style={{ ...styles.button, ...styles.disclosureButton }}>View {server.tools.length} registered tools</summary>
                     <ul style={{ ...styles.caption, marginTop: '12px', maxHeight: '260px', overflow: 'auto' }}>
@@ -963,11 +1166,17 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                     </div>
                   ) : null}
                 </div>
-              ))}
+                )
+              })}
             </div>
 
             <div style={styles.card}>
-              <h3 style={{ ...styles.title, fontSize: '13.5px' }}>Add server</h3>
+              <h3 style={{ ...styles.title, fontSize: '13.5px' }}>
+                {draftMode === 'edit' ? `Edit server: ${mcpDraft.serverName}` : 'Add server'}
+              </h3>
+              {draftMode === 'edit'
+                ? <p style={styles.hint}>serverName cannot be changed (tool names derive from it). To rename a server, remove it and add it again.</p>
+                : null}
               <div style={styles.formGrid}>
                 <div>
                   <label style={styles.fieldLabel}>serverName (namespace)</label>
@@ -977,6 +1186,7 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                     value={mcpDraft.serverName}
                     placeholder="e.g. github"
                     spellCheck={false}
+                    disabled={draftMode === 'edit'}
                     onChange={event => setMcpDraft(current => ({ ...current, serverName: event.target.value }))}
                   />
                 </div>
@@ -999,7 +1209,7 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
               {mcpDraft.transport === 'stdio'
                 ? (
                   <>
-                    <label style={styles.fieldLabel}>Command</label>
+                    <label style={styles.fieldLabel}>Command (pasting a full command splits its arguments below)</label>
                     <input
                       style={styles.input}
                       aria-label="Command"
@@ -1007,18 +1217,29 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                       placeholder="e.g. npx"
                       spellCheck={false}
                       onChange={event => setMcpDraft(current => ({ ...current, command: event.target.value }))}
+                      onPaste={handleCommandPaste}
                     />
-                    <label style={styles.fieldLabel}>Arguments (one per line)</label>
-                    <textarea
-                      style={{ ...styles.textarea, minHeight: '64px' }}
-                      aria-label="Arguments"
-                      value={mcpDraft.args.join('\n')}
-                      placeholder={'-y\n@modelcontextprotocol/server-github'}
-                      onChange={event => setMcpDraft(current => ({
-                        ...current,
-                        args: event.target.value.split('\n').filter(line => line.trim() !== ''),
-                      }))}
-                    />
+                    <label style={styles.fieldLabel}>Arguments</label>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      {mcpDraft.args.map((arg, index) => (
+                        <div key={index} style={styles.argRow}>
+                          <input
+                            style={styles.argInput}
+                            aria-label={`Argument ${index + 1}`}
+                            value={arg}
+                            placeholder={index === 0 ? '-y' : 'another argument'}
+                            spellCheck={false}
+                            onChange={event => setArgAt(index, event.target.value)}
+                            onPaste={event => handleArgPaste(index, event)}
+                          />
+                          <button type="button" style={styles.rowButton} aria-label={`Remove argument ${index + 1}`}
+                            onClick={() => removeArgAt(index)}>−</button>
+                        </div>
+                      ))}
+                      <div>
+                        <button type="button" style={styles.rowButton} aria-label="Add argument" onClick={addArgRow}>+</button>
+                      </div>
+                    </div>
                   </>
                 )
                 : (
@@ -1071,6 +1292,27 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                       }))}
                     />
                   </>)}
+                  <label style={styles.fieldLabel}>Tool call timeout (ms)</label>
+                  <input
+                    style={styles.input}
+                    aria-label="Tool call timeout in milliseconds"
+                    type="number"
+                    min={1000}
+                    step={1000}
+                    value={mcpDraft.toolCallTimeoutMs}
+                    onChange={event => setMcpDraft(current => ({
+                      ...current,
+                      toolCallTimeoutMs: Math.max(Math.trunc(Number(event.target.value) || 0), 0) || 60000,
+                    }))}
+                  />
+              <label style={styles.switchRow}>
+                <input
+                  type="checkbox"
+                  checked={mcpDraft.enabled}
+                  onChange={event => setMcpDraft(current => ({ ...current, enabled: event.target.checked }))}
+                />
+                <span style={styles.hint}>Enabled (projected into the patch layer; disable to keep it saved but unloaded)</span>
+              </label>
               <label style={styles.switchRow}>
                 <input
                   type="checkbox"
@@ -1082,9 +1324,14 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                 </div>
               </details>
               <div style={styles.actions}>
-                <button type="button" style={saving ? { ...styles.primaryButton, ...styles.disabled } : styles.primaryButton} disabled={saving} onClick={() => { void handleAddServer() }}>
-                  {saving ? 'Saving…' : 'Add server'}
+                <button type="button" style={saving ? { ...styles.primaryButton, ...styles.disabled } : styles.primaryButton} disabled={saving} onClick={() => { void handleSaveServer() }}>
+                  {saving ? 'Saving…' : draftMode === 'edit' ? 'Save changes' : 'Add server'}
                 </button>
+                {draftMode === 'edit' ? (
+                  <button type="button" style={styles.button} disabled={saving} onClick={handleCancelEdit}>
+                    Cancel
+                  </button>
+                ) : null}
               </div>
             </div>
           </section>

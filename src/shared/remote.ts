@@ -8,12 +8,13 @@
  * The client's Remote `$mount` requires strict codecs, so every descriptor
  * uses `{ mode: 'strict', schema }` with these validators.
  *
- * One service, `skillMcpManager`, exposes five methods:
+ * One service, `skillMcpManager`, exposes these methods:
  *   - listSkills()                      → SkillsSnapshot
  *   - addSkill(input)                   → SkillMutationOutcome
  *   - setSkillInvocable(input)          → SkillMutationOutcome
  *   - listMcpServers()                  → McpSnapshot
  *   - saveMcpServers(servers)           → McpSaveOutcome
+ *   - getMcpServerLogs(input)           → McpLogsSnapshot
  *
  * @module dsh-skill-mcp-manager/remote
  */
@@ -147,6 +148,12 @@ export interface McpServerDefinition {
   /** MCP namespace; must match `[A-Za-z0-9_-]{1,32}`, unique across live instances. */
   serverName: string
   transport: McpTransport
+  /**
+   * Whether the server is projected into the patch layer. Disabled servers stay
+   * stored here (settings is the durable truth) but have no loader row, so the
+   * bridge instance is disposed; re-enabling remounts it via the patch HMR.
+   */
+  enabled: boolean
   /** stdio only: executable to spawn. */
   command: string
   /** stdio only: arguments passed without shell interpolation. */
@@ -214,6 +221,41 @@ export type McpSaveOutcome =
     readonly patchPath: string
   }
   | { readonly ok: false; readonly error: string }
+
+// ---- MCP server logs ----------------------------------------------------
+
+/** Severity of one captured log line (mirrors the cordis logger levels). */
+export type McpLogLevel = 'error' | 'info' | 'warn' | 'debug'
+
+/** One formatted log line from the mcp-client bridge for one server. */
+export interface McpLogLine {
+  /** Capture time (epoch ms). */
+  readonly ts: number
+  readonly level: McpLogLevel
+  /** The formatted single-line message (format args rendered, errors as stacks). */
+  readonly text: string
+}
+
+/** The log tail for one MCP server, served from the host's capture buffer. */
+export interface McpLogsSnapshot {
+  readonly serverName: string
+  /** Matching lines, oldest first, at most the requested limit. */
+  readonly lines: readonly McpLogLine[]
+  /** Total matching lines held in the buffer (may exceed `lines.length`). */
+  readonly total: number
+  /** Epoch ms when the host started capturing (plugin activation). */
+  readonly capturedSince: number
+  /** Always true while the host half runs; kept so the UI can flag a future gap. */
+  readonly capturing: boolean
+}
+
+/** Payload of one log-tail request. */
+export interface McpLogsInput {
+  /** The MCP namespace whose bridge logs to return. */
+  readonly serverName: string
+  /** Maximum lines to return (default 200, clamped 1..1000). */
+  readonly limit?: number
+}
 
 /** Client-side unwrapped result of one Remote call, shared for panel callbacks. */
 export type RemoteCallOutcome<T> =
@@ -310,7 +352,7 @@ function parseSkillsSnapshot(value: unknown): SkillsSnapshot {
 
 function parseMcpServerDefinition(value: unknown): McpServerDefinition {
   if (!isRecord(value)) throw new TypeError('mcp server must be a plain object')
-  const { id, serverName, transport, command, args, env, cwd, url, headers, toolCallTimeoutMs, failOnStartupError } = value
+  const { id, serverName, transport, command, args, env, cwd, url, headers, toolCallTimeoutMs, failOnStartupError, enabled } = value
   if (!isString(id) || !isString(serverName) || (transport !== 'stdio' && transport !== 'streamable-http')
     || !isString(command) || !isStringArray(args) || !isStringDict(env) || !isString(cwd)
     || !isString(url) || !isStringDict(headers)
@@ -318,9 +360,12 @@ function parseMcpServerDefinition(value: unknown): McpServerDefinition {
     || !isBoolean(failOnStartupError)) {
     throw new TypeError('mcp server has invalid fields')
   }
+  if (enabled !== undefined && !isBoolean(enabled)) throw new TypeError('mcp server enabled must be a boolean')
   return {
     id, serverName,
     transport: transport === 'stdio' ? 'stdio' : 'streamable-http',
+    // Pre-toggle saves have no `enabled`; absence means the server was live.
+    enabled: enabled === undefined ? true : enabled as boolean,
     command, args, env, cwd, url, headers,
     toolCallTimeoutMs, failOnStartupError,
   }
@@ -395,6 +440,45 @@ function parseMcpSaveOutcome(value: unknown): McpSaveOutcome {
   return { ok: false, error: value.error }
 }
 
+function parseMcpLogLine(value: unknown): McpLogLine {
+  if (!isRecord(value) || !isString(value.text)
+    || (value.level !== 'error' && value.level !== 'info' && value.level !== 'warn' && value.level !== 'debug')
+    || typeof value.ts !== 'number' || !Number.isFinite(value.ts)) {
+    throw new TypeError('mcp log line must have a number ts, a level, and string text')
+  }
+  return { ts: value.ts, level: value.level, text: value.text }
+}
+
+function parseMcpLogsSnapshot(value: unknown): McpLogsSnapshot {
+  if (!isRecord(value) || !isString(value.serverName)) {
+    throw new TypeError('mcp logs snapshot must be a plain object with a string serverName')
+  }
+  if (typeof value.total !== 'number' || !Number.isFinite(value.total)
+    || !isBoolean(value.capturing) || typeof value.capturedSince !== 'number' || !Number.isFinite(value.capturedSince)
+    || !Array.isArray(value.lines)) {
+    throw new TypeError('mcp logs snapshot has invalid fields')
+  }
+  return {
+    serverName: value.serverName,
+    lines: value.lines.map(parseMcpLogLine),
+    total: value.total,
+    capturedSince: value.capturedSince,
+    capturing: value.capturing,
+  }
+}
+
+function parseMcpLogsInput(value: unknown): McpLogsInput {
+  if (!isRecord(value) || !isString(value.serverName)) {
+    throw new TypeError('mcp logs input must be a plain object with a string serverName')
+  }
+  if (value.limit !== undefined && (typeof value.limit !== 'number' || !Number.isFinite(value.limit))) {
+    throw new TypeError('mcp logs input limit must be a number')
+  }
+  return value.limit === undefined
+    ? { serverName: value.serverName }
+    : { serverName: value.serverName, limit: value.limit }
+}
+
 function parseSourceMarkdownFile(value: unknown): SourceMarkdownFile {
   if (!isRecord(value) || !isString(value.name) || !isString(value.content)) {
     throw new TypeError('source file must be an object with string name and content')
@@ -456,10 +540,12 @@ function parseSetSkillInvocableInput(value: unknown): SetSkillInvocableInput {
 }
 
 function parseMcpServerList(value: unknown): McpServerDefinition[] {
-  if (!Array.isArray(value) || !value.every(acceptsMcpServer)) {
+  // Map through the strict parser (not just validate): it applies the
+  // `enabled` default so legacy saves without the flag arrive normalized.
+  if (!Array.isArray(value)) {
     throw new TypeError('servers must be an array of mcp server definitions')
   }
-  return value as McpServerDefinition[]
+  return value.map(parseMcpServerDefinition)
 }
 
 // ---- Descriptors ---------------------------------------------------------
@@ -471,6 +557,7 @@ const SKILL_MUTATION_SCHEMA: TypertSchemaBoundary<SkillMutationOutcome> = { pars
 const SKILL_UPLOAD_PREVIEW_SCHEMA: TypertSchemaBoundary<SkillUploadPreview> = { parse: parseSkillUploadPreview }
 const MCP_SNAPSHOT_SCHEMA: TypertSchemaBoundary<McpSnapshot> = { parse: parseMcpSnapshot }
 const MCP_SAVE_SCHEMA: TypertSchemaBoundary<McpSaveOutcome> = { parse: parseMcpSaveOutcome }
+const MCP_LOGS_SCHEMA: TypertSchemaBoundary<McpLogsSnapshot> = { parse: parseMcpLogsSnapshot }
 
 /** The one descriptor each method needs: generated-style identity + strict codecs. */
 function descriptor<R>(
@@ -516,6 +603,12 @@ export const DESCRIPTORS: readonly InvocationDescriptor[] = [
     source: 'json',
     codec: { mode: 'strict', typeSymbol: 'dsh-skill-mcp-manager#McpServerList', schema: { parse: parseMcpServerList } },
   }], MCP_SAVE_SCHEMA),
+  descriptor('getMcpServerLogs', [{
+    name: 'input',
+    wire: 'input',
+    source: 'json',
+    codec: { mode: 'strict', typeSymbol: 'dsh-skill-mcp-manager#McpLogsInput', schema: { parse: parseMcpLogsInput } },
+  }], MCP_LOGS_SCHEMA),
 ]
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
@@ -526,6 +619,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'skillMcpManager/setSkillInvocable'(input: SetSkillInvocableInput): Promise<RemoteResult<SkillMutationOutcome>>
     'skillMcpManager/listMcpServers'(): Promise<RemoteResult<McpSnapshot>>
     'skillMcpManager/saveMcpServers'(servers: McpServerDefinition[]): Promise<RemoteResult<McpSaveOutcome>>
+    'skillMcpManager/getMcpServerLogs'(input: McpLogsInput): Promise<RemoteResult<McpLogsSnapshot>>
   }
   interface TypertRemoteNamespaceMap {
     skillMcpManager: {
@@ -535,6 +629,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
       setSkillInvocable(input: SetSkillInvocableInput): Promise<RemoteResult<SkillMutationOutcome>>
       listMcpServers(): Promise<RemoteResult<McpSnapshot>>
       saveMcpServers(servers: McpServerDefinition[]): Promise<RemoteResult<McpSaveOutcome>>
+      getMcpServerLogs(input: McpLogsInput): Promise<RemoteResult<McpLogsSnapshot>>
     }
   }
 }
