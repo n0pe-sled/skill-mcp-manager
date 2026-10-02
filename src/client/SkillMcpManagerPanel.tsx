@@ -1243,19 +1243,17 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                   <div style={styles.itemLine}>
                     <span style={styles.itemTitle}>{declaration.name}</span>
                     <span style={styles.hint}>{declaration.pluginId}</span>
-                    <button type="button" style={styles.button} disabled={!declaration.actionable}
+                    <button type="button" style={styles.button}
                       onClick={() => useDeclaration(declaration)}>
                       Use
                     </button>
                   </div>
                   <p style={styles.hint}>{`${declaration.command} ${declaration.args.join(' ')}`}</p>
-                  {!declaration.actionable
-                    ? (
-                      <p style={styles.hint}>
-                        {`Needs ${[...declaration.secrets, ...declaration.configuration].join(', ') || 'configuration'} and a checked-out server before it can run.`}
-                      </p>
-                    )
-                    : null}
+                  <p style={styles.hint}>
+                    {declaration.actionable
+                      ? 'Runs as declared; Use pre-fills the form for review.'
+                      : `Needs ${[...declaration.secrets, ...declaration.configuration].join(', ') || 'configuration'} and a checked-out server. Use pre-fills the form so you can supply them.`}
+                  </p>
                 </div>
               ))}
             </div>
