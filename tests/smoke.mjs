@@ -379,7 +379,42 @@ try {
   assert.deepEqual(splitCommandLine('unterminated "quote'), ['unterminated', 'quote'], 'unterminated double quote keeps the tail once')
   assert.deepEqual(splitCommandLine("''"), [''], 'empty quoted argument is preserved')
   assert.deepEqual(splitCommandLine(''), [], 'empty input has no tokens')
-  ok('shlex: splitCommandLine tokenizes pasted commands')
+  // ── agent-plugin MCP discovery ───────────────────────────────────────────────
+{
+  const bare = makeCtx()
+  plugin.apply(bare.ctx, plugin.Config({}))
+  const noHost = await bare.provided.skillMcpManager.listAgentPluginMcpServers()
+  assert.deepEqual(noHost, { servers: [], hostMounted: false }, 'no composed plugin host reports an empty catalog')
+  const noHostCodec = bare.contributions[0].invocations
+    .find(d => d.method === 'listAgentPluginMcpServers').result.schema
+  assert.deepEqual(noHostCodec.parse(noHost), noHost, 'empty catalog round-trips through the codec')
+
+  const hosted = makeCtx()
+  plugin.apply(hosted.ctx, plugin.Config({}))
+  hosted.ctx.get = key => key === 'agentPlugins' ? {
+    listMcpServers: async () => [{
+      pluginId: 'demo',
+      name: 'fixture_mcp',
+      type: 'stdio',
+      command: 'uv',
+      args: ['--directory', '/path/to/fixture', 'run', 'main.py'],
+      secrets: ['FIXTURE_TOKEN'],
+      configuration: ['FIXTURE_URL'],
+      actionable: false,
+    }],
+  } : undefined
+  const declared = await hosted.provided.skillMcpManager.listAgentPluginMcpServers()
+  assert.equal(declared.hostMounted, true, 'a composed plugin host is reported')
+  assert.equal(declared.servers.length, 1, 'the declaration is reported')
+  assert.equal(declared.servers[0].actionable, false, 'an unconfigured declaration stays unactionable')
+  const hostedCodec = hosted.contributions[0].invocations
+    .find(d => d.method === 'listAgentPluginMcpServers').result.schema
+  assert.deepEqual(hostedCodec.parse(declared), declared, 'declared catalog round-trips through the codec')
+  assert.throws(() => hostedCodec.parse({ servers: [{ name: 'x' }], hostMounted: true }), 'a malformed declaration is rejected')
+  ok('agent-plugin flow: declared MCP servers surface through the host service')
+}
+
+ok('shlex: splitCommandLine tokenizes pasted commands')
 
   // 5e. Per-server bridge log capture ---------------------------------------
   assert.equal(exporters.length, 1, 'one logger exporter registered at apply')

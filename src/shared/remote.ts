@@ -210,6 +210,39 @@ export interface McpSnapshot {
   readonly warnings: readonly string[]
 }
 
+/** One MCP server an installed agent-plugin bundle declares. */
+export interface AgentPluginMcpServer {
+  /** Plugin id the declaration belongs to. */
+  readonly pluginId: string
+  /** Server name the declaration uses. */
+  readonly name: string
+  /** Transport the declaration uses, e.g. `stdio`. */
+  readonly type: string
+  /** Executable the declaration says to run. */
+  readonly command: string
+  /** Arguments the declaration says to pass. */
+  readonly args: readonly string[]
+  /** Credential environment variable names the server requires. */
+  readonly secrets: readonly string[]
+  /** Non-secret environment variable names the server reads. */
+  readonly configuration: readonly string[]
+  /**
+   * Whether the declaration carries enough to write a working row. False while an
+   * argument is still an upstream placeholder or a declared credential is unset,
+   * because upstream ships declarations only and expects the person to clone each
+   * server and supply its values.
+   */
+  readonly actionable: boolean
+}
+
+/** MCP servers declared by the installed agent-plugin bundles. */
+export interface AgentPluginMcpSnapshot {
+  /** Every declaration the composed plugin host reported. */
+  readonly servers: readonly AgentPluginMcpServer[]
+  /** Whether a plugin host is composed at all; false on a deployment with none. */
+  readonly hostMounted: boolean
+}
+
 /** Result of saving the managed MCP server set. */
 export type McpSaveOutcome =
   | {
@@ -392,6 +425,32 @@ function parseMcpChildren(value: unknown): McpChildServer[] {
   })
 }
 
+function parseAgentPluginMcpSnapshot(value: unknown): AgentPluginMcpSnapshot {
+  if (!isRecord(value)) throw new TypeError('agent plugin mcp snapshot must be a plain object')
+  if (!isBoolean(value.hostMounted)) {
+    throw new TypeError('agent plugin mcp snapshot requires a boolean hostMounted')
+  }
+  const servers = (value.servers as unknown[] | undefined ?? []).map((entry, index) => {
+    if (!isRecord(entry) || !isString(entry.pluginId) || !isString(entry.name)
+      || !isString(entry.type) || !isString(entry.command)
+      || !isStringArray(entry.args) || !isStringArray(entry.secrets)
+      || !isStringArray(entry.configuration) || !isBoolean(entry.actionable)) {
+      throw new TypeError(`agent plugin mcp server ${String(index)} has invalid fields`)
+    }
+    return {
+      pluginId: entry.pluginId,
+      name: entry.name,
+      type: entry.type,
+      command: entry.command,
+      args: entry.args,
+      secrets: entry.secrets,
+      configuration: entry.configuration,
+      actionable: entry.actionable,
+    }
+  })
+  return { servers, hostMounted: value.hostMounted }
+}
+
 function parseMcpSnapshot(value: unknown): McpSnapshot {
   if (!isRecord(value)) throw new TypeError('mcp snapshot must be a plain object')
   const { servers, live, bridgeResolvable, patchPath, warnings } = value
@@ -558,6 +617,7 @@ const SKILL_UPLOAD_PREVIEW_SCHEMA: TypertSchemaBoundary<SkillUploadPreview> = { 
 const MCP_SNAPSHOT_SCHEMA: TypertSchemaBoundary<McpSnapshot> = { parse: parseMcpSnapshot }
 const MCP_SAVE_SCHEMA: TypertSchemaBoundary<McpSaveOutcome> = { parse: parseMcpSaveOutcome }
 const MCP_LOGS_SCHEMA: TypertSchemaBoundary<McpLogsSnapshot> = { parse: parseMcpLogsSnapshot }
+const AGENT_PLUGIN_MCP_SCHEMA: TypertSchemaBoundary<AgentPluginMcpSnapshot> = { parse: parseAgentPluginMcpSnapshot }
 
 /** The one descriptor each method needs: generated-style identity + strict codecs. */
 function descriptor<R>(
@@ -596,6 +656,7 @@ export const DESCRIPTORS: readonly InvocationDescriptor[] = [
     source: 'json',
     codec: { mode: 'strict', typeSymbol: 'dsh-skill-mcp-manager#SetSkillInvocableInput', schema: { parse: parseSetSkillInvocableInput } },
   }], SKILL_MUTATION_SCHEMA),
+  descriptor('listAgentPluginMcpServers', [], AGENT_PLUGIN_MCP_SCHEMA),
   descriptor('listMcpServers', [], MCP_SNAPSHOT_SCHEMA),
   descriptor('saveMcpServers', [{
     name: 'servers',

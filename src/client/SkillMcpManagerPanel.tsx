@@ -18,7 +18,9 @@ import { Fragment, useEffect, useRef, useState } from 'react'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   AddSkillInput, McpLogsInput, McpLogsSnapshot, McpSaveOutcome, McpServerDefinition, McpServerPhase,
-  McpSnapshot, RemoteCallOutcome, SetSkillInvocableInput, SkillMutationOutcome, SkillsSnapshot,
+  AgentPluginMcpServer, AgentPluginMcpSnapshot, McpSnapshot, RemoteCallOutcome,
+  SetSkillInvocableInput,
+  SkillMutationOutcome, SkillsSnapshot,
   SkillUploadPreview, SourceMarkdownFile,
 } from '../shared/remote.ts'
 import { splitCommandLine } from '../shlex.ts'
@@ -29,6 +31,7 @@ export interface SkillMcpManagerInjected {
   addSkill(input: AddSkillInput): Promise<RemoteCallOutcome<SkillMutationOutcome>>
   previewSkillUpload(source: SourceMarkdownFile): Promise<RemoteCallOutcome<SkillUploadPreview>>
   setSkillInvocable(input: SetSkillInvocableInput): Promise<RemoteCallOutcome<SkillMutationOutcome>>
+  listAgentPluginMcpServers(): Promise<RemoteCallOutcome<AgentPluginMcpSnapshot>>
   listMcpServers(): Promise<RemoteCallOutcome<McpSnapshot>>
   saveMcpServers(servers: McpServerDefinition[]): Promise<RemoteCallOutcome<McpSaveOutcome>>
   getMcpServerLogs(input: McpLogsInput): Promise<RemoteCallOutcome<McpLogsSnapshot>>
@@ -467,6 +470,10 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
   const [mcpDraft, setMcpDraft] = useState<McpServerDefinition>(emptyMcpDraft)
   const [mcpActionNote, setMcpActionNote] = useState<{ ok: boolean; text: string } | null>(null)
   const [saving, setSaving] = useState(false)
+  /** Declarations the installed agent-plugin bundles carry, or null before a read. */
+  const [declared, setDeclared] = useState<AgentPluginMcpSnapshot | null>(null)
+  const [declaring, setDeclaring] = useState(false)
+  const [declareError, setDeclareError] = useState<string | null>(null)
   /** `add` shows the blank form; `edit` targets the server listed in `editId`. */
   const [draftMode, setDraftMode] = useState<'add' | 'edit'>('add')
   const [editId, setEditId] = useState<string | null>(null)
@@ -673,6 +680,49 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
     setDraftMode('edit')
     setMcpActionNote(null)
     setLogPane(null)
+  }
+
+  /**
+   * Read the declarations the installed agent-plugin bundles carry.
+   *
+   * `listAgentPluginMcpServers` answers an empty catalog on a deployment with
+   * no composed plugin host, which is not an error: the tab says so instead.
+   */
+  const refreshDeclared = async () => {
+    setDeclaring(true)
+    setDeclareError(null)
+    const outcome = await props.listAgentPluginMcpServers()
+    setDeclaring(false)
+    if (outcome.ok) {
+      setDeclared(outcome.value)
+      return
+    }
+    setDeclared(null)
+    setDeclareError(outcome.error)
+  }
+
+  /**
+   * Pre-fill the add form from one declaration.
+   *
+   * The declaration carries the command and its argument list, but upstream ships
+   * no server checkout and no credentials, so the form stays open for the person
+   * to supply the paths and values before the row is saved.
+   * @param declaration - one declaration the plugin host reported.
+   */
+  const useDeclaration = (declaration: AgentPluginMcpServer) => {
+    setEditId(null)
+    setDraftMode('add')
+    setMcpDraft({
+      ...emptyMcpDraft(),
+      serverName: declaration.name,
+      transport: declaration.type === 'streamable-http' ? 'streamable-http' : 'stdio',
+      command: declaration.command,
+      args: [...declaration.args],
+    })
+    setMcpActionNote({
+      ok: true,
+      text: `${declaration.pluginId} declares ${declaration.name}. Supply ${[...declaration.secrets, ...declaration.configuration].join(', ') || 'no values'} before saving.`,
+    })
   }
 
   const handleCancelEdit = () => {
@@ -1168,6 +1218,46 @@ export function SkillMcpManagerPanel(props: SkillMcpManagerPanelProps) {
                 </div>
                 )
               })}
+            </div>
+
+            <div style={styles.card}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                <h3 style={{ ...styles.title, fontSize: '13.5px', margin: 0 }}>Declared by installed agent plugins</h3>
+                <button type="button" style={styles.button} disabled={declaring}
+                  onClick={() => void refreshDeclared()}>
+                  {declaring ? 'Reading…' : 'Read declarations'}
+                </button>
+              </div>
+              <p style={styles.hint}>
+                An installed agent-plugin bundle declares MCP servers without shipping them. A declaration lists what to run and which values it needs; nothing is started until you complete it and save.
+              </p>
+              {declareError !== null ? <p style={styles.error} role="status">{declareError}</p> : null}
+              {declared !== null && !declared.hostMounted
+                ? <p style={styles.hint}>No agent plugin is installed, so no bundle declares anything.</p>
+                : null}
+              {declared !== null && declared.hostMounted && declared.servers.length === 0
+                ? <p style={styles.hint}>The installed agent plugins declare no MCP servers.</p>
+                : null}
+              {(declared?.servers ?? []).map(declaration => (
+                <div key={`${declaration.pluginId}/${declaration.name}`} style={styles.item}>
+                  <div style={styles.itemLine}>
+                    <span style={styles.itemTitle}>{declaration.name}</span>
+                    <span style={styles.hint}>{declaration.pluginId}</span>
+                    <button type="button" style={styles.button} disabled={!declaration.actionable}
+                      onClick={() => useDeclaration(declaration)}>
+                      Use
+                    </button>
+                  </div>
+                  <p style={styles.hint}>{`${declaration.command} ${declaration.args.join(' ')}`}</p>
+                  {!declaration.actionable
+                    ? (
+                      <p style={styles.hint}>
+                        {`Needs ${[...declaration.secrets, ...declaration.configuration].join(', ') || 'configuration'} and a checked-out server before it can run.`}
+                      </p>
+                    )
+                    : null}
+                </div>
+              ))}
             </div>
 
             <div style={styles.card}>

@@ -20,7 +20,8 @@ import { SkillMcpManagerPanel } from './SkillMcpManagerPanel.tsx'
 import type { SkillMcpManagerInjected } from './SkillMcpManagerPanel.tsx'
 import { DESCRIPTORS, SERVICE } from '../shared/remote.ts'
 import type {
-  AddSkillInput, McpLogsInput, McpLogsSnapshot, McpSaveOutcome, McpServerDefinition, McpSnapshot,
+  AddSkillInput, AgentPluginMcpSnapshot, McpLogsInput, McpLogsSnapshot, McpSaveOutcome,
+  McpServerDefinition, McpSnapshot,
   RemoteCallOutcome, SetSkillInvocableInput, SkillMutationOutcome, SkillsSnapshot,
   SkillUploadPreview, SourceMarkdownFile,
 } from '../shared/remote.ts'
@@ -32,6 +33,7 @@ interface SkillMcpManagerNamespace {
   addSkill(input: AddSkillInput): Promise<RemoteResult<SkillMutationOutcome>>
   previewSkillUpload(source: SourceMarkdownFile): Promise<RemoteResult<SkillUploadPreview>>
   setSkillInvocable(input: SetSkillInvocableInput): Promise<RemoteResult<SkillMutationOutcome>>
+  listAgentPluginMcpServers(): Promise<RemoteResult<AgentPluginMcpSnapshot>>
   listMcpServers(): Promise<RemoteResult<McpSnapshot>>
   saveMcpServers(servers: McpServerDefinition[]): Promise<RemoteResult<McpSaveOutcome>>
   getMcpServerLogs(input: McpLogsInput): Promise<RemoteResult<McpLogsSnapshot>>
@@ -88,6 +90,7 @@ export function apply(ctx: ClientContext): void {
     addSkill: input => call(ns => ns.addSkill.bind(ns), input),
     previewSkillUpload: source => call(ns => ns.previewSkillUpload.bind(ns), source),
     setSkillInvocable: input => call(ns => ns.setSkillInvocable.bind(ns), input),
+    listAgentPluginMcpServers: () => call(ns => ns.listAgentPluginMcpServers.bind(ns)),
     listMcpServers: () => call(ns => ns.listMcpServers.bind(ns)),
     saveMcpServers: servers => call(ns => ns.saveMcpServers.bind(ns), servers),
     getMcpServerLogs: input => call(ns => ns.getMcpServerLogs.bind(ns), input),

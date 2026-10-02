@@ -45,7 +45,12 @@ import {
   parseSkillDoc, SKILL_FILE, setSkillInvocation,
 } from './skill-fmt.ts'
 import { MCP_CLIENT_NAME, SERVER_NAME_RE, planPatch, rowIdFor, validateServerSet } from './mcp-config.ts'
-import { DESCRIPTORS, SERVICE } from './shared/remote.ts'
+import {
+  DESCRIPTORS,
+  SERVICE,
+  type AgentPluginMcpServer,
+  type AgentPluginMcpSnapshot,
+} from './shared/remote.ts'
 import type {
   AddSkillInput, LiveMcpServer, McpLogsInput, McpLogsSnapshot, McpSaveOutcome, McpServerDefinition, McpSnapshot,
   McpServerPhase, McpLogLevel, SetSkillInvocableInput, SkillMutationOutcome, SkillRootInfo, SkillsSnapshot, SkillUploadPreview,
@@ -137,9 +142,26 @@ interface SkillMcpManagerReceiver {
   addSkill(input: AddSkillInput): Promise<SkillMutationOutcome>
   previewSkillUpload(source: SourceMarkdownFile): Promise<SkillUploadPreview>
   setSkillInvocable(input: SetSkillInvocableInput): Promise<SkillMutationOutcome>
+  listAgentPluginMcpServers(): Promise<AgentPluginMcpSnapshot>
   listMcpServers(): Promise<McpSnapshot>
   saveMcpServers(servers: McpServerDefinition[]): Promise<McpSaveOutcome>
   getMcpServerLogs(input: McpLogsInput): Promise<McpLogsSnapshot>
+}
+
+/**
+ * The `ctx` key `@deepseek-ai/dsh-agent-plugin-host` provides.
+ */
+const SERVICE_AGENT_PLUGINS = 'agentPlugins'
+
+/**
+ * The slice of a composed agent-plugin host this tab consumes. Declared
+ * structurally rather than imported from `@deepseek-ai/dsh-agent-plugin-host`,
+ * because that package is an optional peer this plugin must also install and run
+ * without; the strict wire codec below validates the reply at the boundary.
+ */
+interface AgentPluginHostService {
+  /** Every MCP server the host's installed bundles declare. */
+  listMcpServers(): Promise<readonly AgentPluginMcpServer[]>
 }
 
 /** Root helper: expand `~`, resolve against cwd, require a directory. */
@@ -554,6 +576,26 @@ export function apply(ctx: Context, config: Config) {
         return { ok: false, error: `failed to update ${found.path}: ${error instanceof Error ? error.message : String(error)}` }
       }
       return { ok: true, path: found.path }
+    },
+
+    async listAgentPluginMcpServers(): Promise<AgentPluginMcpSnapshot> {
+      // Optional: a deployment with no installed agent plugin mounts no host, so
+      // the tab reports an empty catalog rather than failing the whole snapshot.
+      const host = ctx.get(SERVICE_AGENT_PLUGINS) as AgentPluginHostService | undefined
+      if (host === undefined) return { servers: [], hostMounted: false }
+      return {
+        servers: (await host.listMcpServers()).map(server => ({
+          pluginId: server.pluginId,
+          name: server.name,
+          type: server.type,
+          command: server.command,
+          args: [...server.args],
+          secrets: [...server.secrets],
+          configuration: [...server.configuration],
+          actionable: server.actionable,
+        })),
+        hostMounted: true,
+      }
     },
 
     async listMcpServers(): Promise<McpSnapshot> {
